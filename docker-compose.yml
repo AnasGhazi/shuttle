@@ -1,7 +1,8 @@
-# Local Redis for development.
-#   Start:  docker compose up -d redis
-#   Stop:   docker compose down
-#   CLI:    docker compose exec redis redis-cli
+# Local development:
+#   docker compose up -d redis        Redis only; run the app with `npm run dev`
+#   docker compose --profile app up   Redis + Shuttle in a container
+#   docker compose exec redis redis-cli
+#   docker compose down
 services:
   redis:
     image: redis:7-alpine
@@ -15,3 +16,18 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  app:
+    profiles: ["app"]
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      REDIS_URL: redis://redis:6379
+      # Docker's port forwarding hides the client's real IP behind the
+      # bridge network's private address. That's fine locally (everyone
+      # lands on the "lan" court), but see docs/DEPLOYMENT.md for real use.
+      TRUST_PROXY: "false"
+    depends_on:
+      redis:
+        condition: service_healthy

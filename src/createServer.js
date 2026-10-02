@@ -10,6 +10,8 @@ const { connectRedis, connectDuplicate } = require('./redis');
 const { createStore } = require('./store');
 const { createClientIpResolver } = require('./clientIp');
 const { attachRealtime } = require('./realtime');
+const { buildIceServers } = require('./ice');
+const { courtIdFromIp } = require('./courtId');
 
 /**
  * Build the whole app (HTTP + Socket.IO + Redis) without starting to listen.
@@ -41,12 +43,19 @@ async function createShuttleServer(config) {
 
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
-  // ICE servers for WebRTC (see config.js). Served from the backend so TURN
-  // credentials can change without touching frontend code.
+  // ICE servers for WebRTC (see config.js and ice.js). Served from the
+  // backend so TURN credentials can change (or expire) without touching
+  // frontend code. no-store: time-limited credentials must not be cached.
   app.get('/api/rtc-config', (_req, res) => {
-    const iceServers = [{ urls: config.stunUrls }];
-    if (config.turn) iceServers.push(config.turn);
-    res.set('Cache-Control', 'no-store').json({ iceServers });
+    res.set('Cache-Control', 'no-store').json({ iceServers: buildIceServers(config) });
+  });
+
+  // "What does the server think my IP is?" Use it after deploying to check
+  // TRUST_PROXY: it should show your real public IP, not the proxy's.
+  // It only ever reveals the caller's own address.
+  app.get('/api/whoami', (req, res) => {
+    const ip = clientIp(req);
+    res.set('Cache-Control', 'no-store').json({ ip, courtId: courtIdFromIp(ip) });
   });
 
   // Used by load balancers / uptime checks.

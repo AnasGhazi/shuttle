@@ -1,7 +1,7 @@
 'use strict';
 
 const os = require('node:os');
-const { config } = require('./config');
+const { config, configWarnings } = require('./config');
 const { createShuttleServer } = require('./createServer');
 
 /** LAN addresses of this machine, so you know what to open on your phone. */
@@ -13,10 +13,12 @@ function lanUrls(port) {
 }
 
 async function main() {
+  for (const warning of configWarnings(config)) console.warn(`[shuttle] ⚠️  ${warning}`);
   const server = await createShuttleServer(config);
 
   server.httpServer.listen(config.port, config.host, () => {
     console.log(`🏸 Shuttle is on court at http://localhost:${config.port}`);
+    console.log(`   trust proxy: ${JSON.stringify(config.trustProxy)} · TURN: ${config.turn ? config.turn.urls.join(', ') : 'none (STUN only)'}`);
     for (const url of lanUrls(config.port)) console.log(`   other devices on this Wi-Fi: ${url}`);
   });
 

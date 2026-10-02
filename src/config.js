@@ -58,21 +58,41 @@ const config = {
   //        corporate firewalls, some mobile carriers). Costs bandwidth, so
   //        there is no free public one. Set these to use your own:
   //
-  //        TURN_URL=turn:turn.example.com:3478
-  //        TURN_USERNAME=...
-  //        TURN_CREDENTIAL=...
+  //        TURN_URL=turn:turn.example.com:3478,turns:turn.example.com:5349
+  //        then EITHER static credentials:
+  //          TURN_USERNAME=...   TURN_CREDENTIAL=...
+  //        OR (recommended) a shared secret for time-limited credentials:
+  //          TURN_SECRET=...     (coturn: use-auth-secret + static-auth-secret)
+  //          TURN_TTL_S=86400    (how long each issued credential works)
   //
-  //  The browser fetches this list from GET /api/rtc-config.
+  //  The browser fetches this list from GET /api/rtc-config (see src/ice.js).
   // ==========================================================================
-  stunUrls: (process.env.STUN_URLS || 'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302')
+  stunUrls: (process.env.STUN_URLS ?? 'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302')
     .split(',').map((s) => s.trim()).filter(Boolean),
   turn: process.env.TURN_URL
     ? {
-        urls: process.env.TURN_URL.split(',').map((s) => s.trim()),
+        urls: process.env.TURN_URL.split(',').map((s) => s.trim()).filter(Boolean),
         username: process.env.TURN_USERNAME || '',
         credential: process.env.TURN_CREDENTIAL || '',
+        secret: process.env.TURN_SECRET || '',
+        ttlS: int('TURN_TTL_S', 24 * 60 * 60),
       }
     : null,
 };
 
-module.exports = { config, parseTrustProxy };
+/** Warnings worth printing at startup (misconfigurations, not errors). */
+function configWarnings(c) {
+  const warnings = [];
+  if (c.trustProxy === true) {
+    warnings.push(
+      'TRUST_PROXY=true trusts X-Forwarded-For from anyone, so clients can pick any court ' +
+        'by faking the header. Use a hop count (e.g. 1) or your proxy\'s addresses instead.',
+    );
+  }
+  if (c.turn && !c.turn.secret && !(c.turn.username && c.turn.credential)) {
+    warnings.push('TURN_URL is set but has no credentials (set TURN_SECRET, or TURN_USERNAME + TURN_CREDENTIAL).');
+  }
+  return warnings;
+}
+
+module.exports = { config, parseTrustProxy, configWarnings };

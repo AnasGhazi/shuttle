@@ -55,6 +55,19 @@ function attachRealtime(io, { store, clientIp, config }) {
     while (inflight.size) await Promise.allSettled([...inflight]);
   }
 
+  // Deployed behind a proxy but TRUST_PROXY not set? Then every visitor
+  // appears to come from the proxy's address and lands on ONE court together.
+  // Say so once, loudly.
+  let warnedAboutProxy = false;
+  function warnIfUntrustedProxy(req) {
+    if (warnedAboutProxy || config.trustProxy !== false || !req.headers['x-forwarded-for']) return;
+    warnedAboutProxy = true;
+    console.warn(
+      '[shuttle] Requests carry X-Forwarded-For but TRUST_PROXY is off, so client IPs are the ' +
+        "proxy's. If you're behind a proxy/load balancer, set TRUST_PROXY (see docs/DEPLOYMENT.md).",
+    );
+  }
+
   async function broadcastDevices(courtId) {
     io.to(courtRoom(courtId)).emit('court:devices', await store.listDevices(courtId));
   }
@@ -82,6 +95,7 @@ function attachRealtime(io, { store, clientIp, config }) {
       others.disconnectSockets(true);
 
       const ip = clientIp(socket.request);
+      warnIfUntrustedProxy(socket.request);
       socket.data.deviceId = deviceId;
       // Unparseable IP: put the device on its own. It can still use a code.
       socket.data.networkCourtId = courtIdFromIp(ip) ?? `solo:${deviceId}`;

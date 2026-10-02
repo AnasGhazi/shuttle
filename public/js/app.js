@@ -63,8 +63,12 @@ function saveCourt(court) {
 }
 
 // Read ?code=1234 once, then tidy the URL so a reload doesn't re-use it.
-const linkCode = new URLSearchParams(location.search).get('code');
-if (linkCode) history.replaceState(null, '', location.pathname);
+const params = new URLSearchParams(location.search);
+const linkCode = params.get('code');
+if (linkCode) {
+  params.delete('code');
+  history.replaceState(null, '', location.pathname + (params.size ? `?${params}` : ''));
+}
 
 const CODE_ERRORS = {
   'bad-code': 'Court codes are 4 digits.',
@@ -221,9 +225,14 @@ setInterval(renderCourt, 30_000);
 //  Peer-to-peer links and file transfers
 // =============================================================================
 
+// Open Shuttle with ?relay=1 to force every link through your TURN server.
+const relayOnly = new URLSearchParams(location.search).has('relay');
+if (relayOnly) rtcLog('relay-only mode: links will use TURN or fail');
+
 const peers = createPeerManager({
   socket,
   iceServers,
+  relayOnly,
   getMyId: () => state.you?.id,
   onState: (peerId, { state: linkState, route }) => {
     const prev = state.links.get(peerId) ?? {};

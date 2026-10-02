@@ -236,3 +236,44 @@ npm run dev
       other device.
 - [ ] Turn on "Reduce motion" (iOS: Settings → Accessibility → Motion): no
       arc.
+
+---
+
+## Phase 6: deployment prep
+
+**What:** everything in [DEPLOYMENT.md](DEPLOYMENT.md), plus:
+- `src/ice.js`: STUN/TURN list with **time-limited TURN credentials** from
+  `TURN_SECRET` (HMAC-SHA1 of `expiry:shuttle`, the scheme coturn checks), or
+  static credentials.
+- `GET /api/whoami`: the IP and court the server sees for you. Use it to
+  check `TRUST_PROXY` after deploying.
+- `?relay=1`: forces links through TURN to test a TURN server. A 15 s
+  watchdog marks any link that can't connect as failed.
+- Startup warnings for `TRUST_PROXY=true` and TURN without credentials, and
+  a one-time warning if `X-Forwarded-For` arrives while no proxy is trusted.
+- `Dockerfile` (non-root, health check) and a `docker compose --profile app`
+  service.
+
+**Run it:**
+```bash
+npm test
+TRUST_PROXY=1 npm start                     # as on a PaaS
+curl localhost:3000/api/whoami
+TURN_URL=turn:turn.example.com:3478 TURN_SECRET=dev npm start
+curl localhost:3000/api/rtc-config          # time-limited TURN credentials
+docker compose --profile app up --build     # full stack in containers
+```
+
+**Two-device checklist (after deploying):**
+- [ ] `/api/whoami` on your phone shows your real public IP, on Wi-Fi and on
+      mobile data, never a `10.x` address or `"lan"`.
+- [ ] `curl -H 'X-Forwarded-For: 1.2.3.4' https://your-app/api/whoami` does
+      **not** report `1.2.3.4`.
+- [ ] Phone and laptop on the same Wi-Fi land on the same court
+      automatically and link "direct on your network".
+- [ ] Phone on mobile data + laptop on Wi-Fi, joined by court code: text
+      works. Files work directly, or via TURN if configured.
+- [ ] With TURN configured: `/?relay=1` on both devices shows "relayed through
+      TURN" and files still arrive.
+- [ ] Redeploy or restart while connected: devices reconnect on their own and
+      the text is still there.

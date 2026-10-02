@@ -53,6 +53,7 @@ const randomId = () => Math.random().toString(36).slice(2, 10);
 /**
  * @param socket       the Socket.IO connection (used as the signaling channel)
  * @param iceServers   from GET /api/rtc-config (STUN, optionally TURN)
+ * @param relayOnly    force traffic through TURN (for testing a TURN server)
  * @param getMyId      () => our device id
  * @param onState      (peerId, { state, route }) -> void, for the UI
  * @param onMessage    (peerId, message) -> void, JSON from the control channel
@@ -60,7 +61,7 @@ const randomId = () => Math.random().toString(36).slice(2, 10);
  *                     other side opens (used for file transfers in Phase 4)
  * @param log          (text) -> void, for the "under the net" debug log
  */
-export function createPeerManager({ socket, iceServers, getMyId, onState, onMessage, onChannel, log = () => {} }) {
+export function createPeerManager({ socket, iceServers, relayOnly = false, getMyId, onState, onMessage, onChannel, log = () => {} }) {
   /** peerId -> Peer. See newPeer() for the shape. */
   const peers = new Map();
   /** peerId -> waiters, for a responder that asked for a connection and is
@@ -87,7 +88,9 @@ export function createPeerManager({ socket, iceServers, getMyId, onState, onMess
     closePeer(peerId, 'restart');
 
     // iceServers tells ICE which STUN/TURN servers to ask for candidates.
-    const pc = new RTCPeerConnection({ iceServers });
+    // iceTransportPolicy 'relay' throws away every candidate except TURN
+    // ones: the only way to be sure your TURN server really works.
+    const pc = new RTCPeerConnection({ iceServers, iceTransportPolicy: relayOnly ? 'relay' : 'all' });
     const peer = {
       id: peerId,
       pcId,
@@ -101,6 +104,16 @@ export function createPeerManager({ socket, iceServers, getMyId, onState, onMess
     };
     peers.set(peerId, peer);
     setState(peer, 'connecting');
+
+    // Watchdog: if ICE finds no usable path it can sit in 'checking' for a
+    // long time (or forever, with no candidates at all) without reporting
+    // 'failed'. Give up after a while so the UI can say so.
+    setTimeout(() => {
+      if (peers.get(peerId) === peer && peer.state === 'connecting') {
+        log(`${short(peerId)} gave up: no working path found`);
+        closePeer(peerId, 'failed');
+      }
+    }, CONNECT_TIMEOUT_MS);
 
     // ICE found a way the other side might reach us: pass it on. A `null`
     // candidate just means "done gathering", so there's nothing to send.

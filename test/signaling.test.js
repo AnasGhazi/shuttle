@@ -26,6 +26,11 @@ test('WebRTC signaling relay (needs Redis)', async (t) => {
     assert.ok(iceServers[0].urls.some((u) => u.startsWith('stun:')));
   });
 
+  await t.test('whoami reports the client IP and court as the server sees them', async () => {
+    const res = await fetch(`${server.url}/api/whoami`, { headers: { 'x-forwarded-for': '2001:db8:5:6::9' } });
+    assert.deepEqual(await res.json(), { ip: '2001:db8:5:6::9', courtId: 'ip6:2001:db8:5:6::/64' });
+  });
+
   await t.test('relays a signal to a device on the same court, tagged with the sender', async () => {
     const got = next(b.socket, 'rtc:signal');
     a.socket.emit('rtc:signal', { to: b.state.you.id, data: { type: 'offer', pcId: 'x', sdp: { type: 'offer', sdp: 'v=0' } } });
