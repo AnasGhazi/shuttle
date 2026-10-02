@@ -16,6 +16,18 @@ async function main() {
   for (const warning of configWarnings(config)) console.warn(`[shuttle] ⚠️  ${warning}`);
   const server = await createShuttleServer(config);
 
+  // listen() reports failures as an 'error' event, not a thrown error.
+  // Without this handler a busy port crashes with a long stack trace.
+  server.httpServer.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`Port ${config.port} is already in use. Is Shuttle already running in another terminal?`);
+      console.error(`Stop that one, or use another port: PORT=${config.port + 1} npm run dev`);
+    } else {
+      console.error('Server error:', err.message);
+    }
+    process.exit(1);
+  });
+
   server.httpServer.listen(config.port, config.host, () => {
     console.log(`🏸 Shuttle is on court at http://localhost:${config.port}`);
     console.log(`   trust proxy: ${JSON.stringify(config.trustProxy)} · TURN: ${config.turn ? config.turn.urls.join(', ') : 'none (STUN only)'}`);
