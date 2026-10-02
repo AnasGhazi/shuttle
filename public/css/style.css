@@ -27,3 +27,13 @@ button { font: inherit; padding: 6px 14px; border-radius: 999px; border: 1px sol
 .log { font: 12px/1.5 ui-monospace, Menlo, monospace; max-height: 240px; overflow: auto; padding-left: 0; list-style: none; }
 .toasts { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); display: grid; gap: 8px; z-index: 10; }
 .toast { background: #17231c; color: #fff; padding: 10px 16px; border-radius: 12px; }
+.device__actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.transfer-list { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 10px; }
+.transfer { border: 1px solid #dde5e0; border-radius: 12px; padding: 10px 12px; display: grid; gap: 6px; }
+.transfer__title { overflow-wrap: anywhere; }
+.transfer__preview { max-width: 100%; max-height: 240px; border-radius: 8px; }
+.bar { height: 8px; background: #e5ece8; border-radius: 999px; overflow: hidden; }
+.bar__fill { height: 100%; width: 0; background: var(--green); transition: width 0.15s linear; }
+.button { display: inline-block; text-decoration: none; font: inherit; padding: 6px 14px; border-radius: 999px; border: 1px solid var(--green); }
+.button--primary { background: var(--green); color: #fff; }
+.button--quiet { border-color: transparent; }

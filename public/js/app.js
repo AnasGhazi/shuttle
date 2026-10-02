@@ -1,6 +1,7 @@
 import { getDeviceToken, rotateDeviceToken } from './identity.js';
 import { createTextSync } from './textSync.js';
 import { createPeerManager } from './rtc.js';
+import { createTransfers } from './transfer.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -107,10 +108,18 @@ const peers = createPeerManager({
     renderDevices();
   },
   onMessage: (peerId, msg) => handlePeerMessage(peerId, msg),
+  onChannel: (peerId, channel) => transfers.handleChannel(peerId, channel),
   log: rtcLog,
 });
 
+const transfers = createTransfers({ peers, onUpdate: () => renderTransfers() });
+
 function handlePeerMessage(peerId, msg) {
+  if (typeof msg.type === 'string' && msg.type.startsWith('file-')) {
+    if (msg.type === 'file-offer') toast(`${deviceName(peerId)} is serving you a file`);
+    transfers.handleMessage(peerId, msg);
+    return;
+  }
   switch (msg.type) {
     // The data channel test: answer a ping straight back with a pong.
     case 'ping':
@@ -137,7 +146,44 @@ async function testRally(peerId) {
 function syncPeers() {
   const others = state.devices.filter((d) => d.id !== state.you?.id);
   peers.syncDevices(state.devices, { eager: others.length <= EAGER_LINK_LIMIT });
+  for (const t of transfers.list()) {
+    if (!others.some((d) => d.id === t.peerId)) transfers.peerGone(t.peerId);
+  }
 }
+
+// ---- Serving files ------------------------------------------------------------
+
+// One hidden <input type=file> for every "serve" button; we remember who
+// the files are for (one device id, or null for everyone).
+let serveTarget = null;
+const fileInput = $('#file-input');
+
+function pickFiles(target) {
+  serveTarget = target;
+  fileInput.value = ''; // so picking the same file twice still fires 'change'
+  fileInput.click();
+}
+
+function serveFiles(files, target) {
+  const others = state.devices.filter((d) => d.id !== state.you?.id);
+  const targets = target ? [target] : others.map((d) => d.id);
+  if (targets.length === 0) return toast('No one else is on the court yet.');
+  // "Everyone" is simply one transfer per device, each accepted separately.
+  for (const file of files) for (const peerId of targets) transfers.sendFile(peerId, file);
+}
+
+fileInput.addEventListener('change', () => serveFiles([...fileInput.files], serveTarget));
+$('#serve-all').addEventListener('click', () => pickFiles(null));
+
+// Drag and drop anywhere on the page serves to everyone.
+document.addEventListener('dragover', (e) => {
+  if (e.dataTransfer?.types.includes('Files')) e.preventDefault();
+});
+document.addEventListener('drop', (e) => {
+  if (!e.dataTransfer?.files.length) return;
+  e.preventDefault();
+  serveFiles([...e.dataTransfer.files], null);
+});
 
 // Full snapshot after joining a court.
 socket.on('court:state', ({ court, you, devices, text }) => {
@@ -231,13 +277,103 @@ function renderDevices() {
       info.append(el('strong', { textContent: displayName(d) }));
       info.append(el('span', { className: 'muted device__link', textContent: linkLabel(state.links.get(d.id)) }));
 
-      const ping = el('button', { type: 'button', textContent: 'Test rally' });
+      const actions = el('div', { className: 'device__actions' });
+      const serve = el('button', { type: 'button', textContent: 'Serve file' });
+      serve.addEventListener('click', () => pickFiles(d.id));
+      const ping = el('button', { type: 'button', textContent: 'Test rally', className: 'button--quiet' });
       ping.addEventListener('click', () => testRally(d.id));
+      actions.append(serve, ping);
 
-      li.append(info, ping);
+      li.append(info, actions);
       return li;
     }),
   );
+}
+
+function transferStatus(t) {
+  const pct = t.size ? Math.floor((t.bytes / t.size) * 100) : 100;
+  const seconds = t.startedAt ? (performance.now() - t.startedAt) / 1000 : 0;
+  const speed = seconds > 0.5 ? ` · ${formatBytes(t.bytes / seconds)}/s` : '';
+  const why = t.error ? ` (${t.error})` : '';
+  switch (t.state) {
+    case 'offered':
+      return 'wants to serve you this file';
+    case 'waiting':
+      return 'Waiting for them to accept…';
+    case 'sending':
+      return `Serving… ${pct}%${speed}`;
+    case 'receiving':
+      return t.bytes ? `Receiving… ${pct}%${speed}` : 'Accepted, starting…';
+    case 'confirming':
+      return 'Sent, waiting for the return…';
+    case 'done':
+      return t.direction === 'out' ? 'Returned ✓ They have it.' : 'Received ✓';
+    case 'declined':
+      return `Declined${why}`;
+    case 'cancelled':
+      return `Cancelled${why}`;
+    default:
+      return `Failed${why}`;
+  }
+}
+
+function renderTransfers() {
+  const items = transfers.list().reverse(); // newest first
+  $('#transfer-list').replaceChildren(
+    ...items.map((t) => {
+      const li = el('li', { className: `transfer transfer--${t.state}` });
+      const who = deviceName(t.peerId);
+      const title = el('div', { className: 'transfer__title' });
+      title.append(
+        el('strong', { textContent: t.name }),
+        el('span', { className: 'muted', textContent: ` ${formatBytes(t.size)} · ${t.direction === 'out' ? `to ${who}` : `from ${who}`}` }),
+      );
+
+      // Progress bar: an outer track and an inner fill whose width we set.
+      const bar = el('div', { className: 'bar' });
+      const fill = el('div', { className: 'bar__fill' });
+      fill.style.width = `${t.size ? (t.bytes / t.size) * 100 : t.state === 'done' ? 100 : 0}%`;
+      bar.append(fill);
+
+      const status = el('div', { className: 'muted transfer__status', textContent: transferStatus(t) });
+      const actions = el('div', { className: 'row' });
+      const button = (label, onClick, className = '') => {
+        const b = el('button', { type: 'button', textContent: label, className });
+        b.addEventListener('click', onClick);
+        actions.append(b);
+      };
+
+      if (t.state === 'offered') {
+        button('Accept', () => transfers.accept(t.id), 'button--primary');
+        button('Decline', () => transfers.decline(t.id));
+      } else if (['waiting', 'sending', 'receiving', 'confirming'].includes(t.state)) {
+        button('Cancel', () => transfers.cancel(t.id));
+      } else {
+        if (t.direction === 'in' && t.state === 'done') {
+          // A blob: URL plus the `download` attribute saves it under its name.
+          actions.append(el('a', { href: t.url, download: t.name, className: 'button button--primary', textContent: 'Save file' }));
+        }
+        button('Dismiss', () => transfers.dismiss(t.id), 'button--quiet');
+      }
+
+      li.append(title, bar, status, actions);
+      if (t.direction === 'in' && t.state === 'done' && t.mime.startsWith('image/')) {
+        li.append(el('img', { src: t.url, alt: t.name, className: 'transfer__preview' }));
+      }
+      return li;
+    }),
+  );
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${Math.round(n)} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let i = -1;
+  do {
+    n /= 1024;
+    i += 1;
+  } while (n >= 1024 && i < units.length - 1);
+  return `${n.toFixed(n < 10 ? 1 : 0)} ${units[i]}`;
 }
 
 // ---- Small DOM helpers ------------------------------------------------------

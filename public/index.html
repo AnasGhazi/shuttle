@@ -33,6 +33,16 @@
       <ul id="device-list" class="device-list"></ul>
       <p id="devices-empty" class="muted">No one else here yet. Open Shuttle on another device on this Wi-Fi.</p>
     </section>
+    <section class="card">
+      <h2>Files</h2>
+      <input type="file" id="file-input" multiple hidden>
+      <div class="row">
+        <button id="serve-all" type="button">Serve a file to everyone</button>
+      </div>
+      <p class="muted">Files go straight to the other device and never touch the server. You can also drop files anywhere on the page.</p>
+      <ul id="transfer-list" class="transfer-list"></ul>
+    </section>
+
     <details class="card">
       <summary>Under the net (WebRTC log)</summary>
       <ol id="rtc-log" class="log"></ol>

@@ -136,3 +136,53 @@ npm run dev
 
 Verified here in real browsers: Chromium↔Chromium, Chromium↔WebKit (Safari's
 engine) and WebKit↔WebKit, including reconnecting after a reload.
+
+---
+
+## Phase 4: chunked file transfer
+
+**What:** `public/js/transfer.js`. Offer → accept/decline → a dedicated
+`file:<id>` data channel → 64 KB chunks → Blob → download link → receipt.
+Serve to one device (its **Serve file** button) or everyone (**Serve a file
+to everyone**, or drop files on the page).
+
+**Why this way:**
+- **Accept before anything moves.** The offer is a few bytes of JSON on the
+  control channel. The file isn't read until the receiver accepts.
+- **A data channel per file.** Chunks need no headers, and transfers can run
+  in parallel. Opening extra channels on a live connection needs no
+  renegotiation.
+- **Backpressure.** `send()` only queues. We pause above 4 MB queued and resume
+  on `bufferedamountlow` (threshold 1 MB). Verified: a 300 MB send peaked at
+  4.06 MB queued.
+- **The sender closes file channels.** The close and the `file-received` /
+  `file-cancel` message travel on different channels, so a receiver-side close
+  could overtake them. WebKit then throws on the next `send()`. The receiver
+  just stops listening.
+- **Received files live in memory** until saved, so incoming files are capped
+  at 2 GiB (`MAX_FILE_BYTES`). Streaming to disk is a possible upgrade (see
+  the README).
+
+**Run it:**
+```bash
+npm run dev
+```
+
+**Two-device checklist:**
+- [ ] Phone: **Serve file** next to the laptop, pick a photo. The laptop shows
+      "wants to serve you this file" with Accept / Decline.
+- [ ] Accept: both progress bars move, then the phone shows "Returned ✓" and the
+      laptop shows **Save file** plus an image preview.
+- [ ] Saved file opens correctly (try a large video, 500 MB or more, for
+      backpressure).
+- [ ] Decline: the sender shows "Declined".
+- [ ] Cancel halfway from either side: both sides show "Cancelled", and
+      **Test rally** still works afterwards.
+- [ ] Three devices: **Serve a file to everyone**. Each receiver
+      accepts or declines separately.
+- [ ] Close the receiver's tab mid-transfer: the sender shows Failed/Cancelled
+      instead of hanging.
+
+Verified here: 50 MB byte-identical (SHA-256) Chromium↔Chromium,
+Chromium→WebKit and WebKit→Chromium; decline, empty file, cancel mid-transfer,
+serve to everyone with 3 devices.
