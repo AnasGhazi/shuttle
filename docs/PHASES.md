@@ -91,3 +91,48 @@ docker compose exec redis redis-cli --scan --pattern 'shuttle:*'
       resets when you type.
 - [ ] Multi-instance: `PORT=3001 npm start` in a second terminal, open
       `:3000` on one device and `:3001` on the other. They still share text.
+
+---
+
+## Phase 3: WebRTC signaling and a peer-to-peer link
+
+**What:** the server relays `rtc:signal` messages (offer, answer, ICE
+candidates) between devices **on the same court only**. In the browser,
+`public/js/rtc.js` sets up an `RTCPeerConnection` with a `control` data
+channel. A "Test rally" button sends a ping over it and shows the round trip.
+
+**Why this way:**
+- **No glare.** The device with the smaller ID always sends the offer. The
+  other side sends a `connect-request` when it wants a link.
+- **Generations.** Every attempt has a random `pcId`. Late candidates from an
+  abandoned attempt are ignored instead of breaking the new one.
+- **Candidate parking.** ICE candidates can arrive before the offer/answer is
+  applied, and `addIceCandidate()` would throw. They wait in a queue.
+- **ICE servers from the backend** (`GET /api/rtc-config`), so adding TURN is
+  a config change, not a code change.
+- **Eager on small courts.** With 6 or fewer peers, links form as soon as
+  someone joins, so the first file starts instantly. On big courts they form
+  on demand.
+
+**Run it:**
+```bash
+npm test
+npm run dev
+```
+
+**Two-device checklist:**
+- [ ] Within a few seconds each device shows the other as
+      "Linked · direct on your network".
+- [ ] Tap **Test rally** on the phone: the laptop shows a toast, and the
+      phone shows "· N ms return" (single-digit to tens of ms on Wi-Fi).
+- [ ] Open **Under the net** to watch the offer → candidates → answer →
+      connected sequence.
+- [ ] Reload one device: the link drops, then comes back on its own.
+- [ ] Stop the server (Ctrl+C) *after* linking, then press **Test rally**: it
+      still works. The data channel doesn't go through the server.
+- [ ] On a phone using mobile data (not Wi-Fi), with a court code from Phase 5,
+      you may see "direct via STUN" or a failure; the failure is the case TURN
+      solves (Phase 6).
+
+Verified here in real browsers: Chromium↔Chromium, Chromium↔WebKit (Safari's
+engine) and WebKit↔WebKit, including reconnecting after a reload.

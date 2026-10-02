@@ -10,6 +10,7 @@ const crypto = require('node:crypto');
 const { createClient } = require('redis');
 const { io: connect } = require('socket.io-client');
 const { createShuttleServer } = require('../src/createServer');
+const { config } = require('../src/config');
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
@@ -28,14 +29,11 @@ async function redisAvailable() {
 
 async function startServer(overrides = {}) {
   const server = await createShuttleServer({
+    ...config, // the real defaults, so tests can't drift from them
     port: 0,
     host: '127.0.0.1',
     redisUrl: REDIS_URL,
     trustProxy: ['loopback'],
-    presenceHeartbeatMs: 20_000,
-    presenceStaleMs: 60_000,
-    textTtlS: 1800,
-    textMaxLength: 50_000,
     ...overrides,
   });
   await new Promise((resolve) => server.httpServer.listen(0, '127.0.0.1', resolve));

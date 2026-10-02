@@ -46,6 +46,31 @@ const config = {
   textTtlS: int('TEXT_TTL_S', 30 * 60),
   // Longest text a court can hold (characters).
   textMaxLength: int('TEXT_MAX_LENGTH', 50_000),
+
+  // ==========================================================================
+  //  WebRTC ICE servers: how browsers find a path to each other.
+  // ==========================================================================
+  //  STUN: "what's my public address?" Free, cheap, enough for most home
+  //        networks. Google runs public ones.
+  //  TURN: a relay for networks where a direct path is impossible (strict
+  //        corporate firewalls, some mobile carriers). Costs bandwidth, so
+  //        there is no free public one. Set these to use your own:
+  //
+  //        TURN_URL=turn:turn.example.com:3478
+  //        TURN_USERNAME=...
+  //        TURN_CREDENTIAL=...
+  //
+  //  The browser fetches this list from GET /api/rtc-config.
+  // ==========================================================================
+  stunUrls: (process.env.STUN_URLS || 'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302')
+    .split(',').map((s) => s.trim()).filter(Boolean),
+  turn: process.env.TURN_URL
+    ? {
+        urls: process.env.TURN_URL.split(',').map((s) => s.trim()),
+        username: process.env.TURN_USERNAME || '',
+        credential: process.env.TURN_CREDENTIAL || '',
+      }
+    : null,
 };
 
 module.exports = { config, parseTrustProxy };

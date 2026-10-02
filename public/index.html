@@ -33,7 +33,13 @@
       <ul id="device-list" class="device-list"></ul>
       <p id="devices-empty" class="muted">No one else here yet. Open Shuttle on another device on this Wi-Fi.</p>
     </section>
+    <details class="card">
+      <summary>Under the net (WebRTC log)</summary>
+      <ol id="rtc-log" class="log"></ol>
+    </details>
   </main>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
 
   <!-- Socket.IO serves its own browser client at this path. -->
   <script src="/socket.io/socket.io.js"></script>

@@ -23,6 +23,9 @@ const deviceRoom = (deviceId) => `device:${deviceId}`;
  * can't work backwards to the token, so they can't impersonate the device.
  */
 const TOKEN_RE = /^[0-9a-f]{32}$/;
+const DEVICE_ID_RE = /^[0-9a-f]{16}$/;
+// An SDP offer is a few KB; this leaves plenty of room.
+const MAX_SIGNAL_BYTES = 32 * 1024;
 function deviceIdFromToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex').slice(0, 16);
 }
@@ -154,6 +157,29 @@ function attachRealtime(io, { store, clientIp, config }) {
         reply({ ok: true, version: saved.version, expiresAt: saved.expiresAt });
         socket.to(courtRoom(court.id)).emit('text:changed', saved);
       });
+    });
+
+    // ---- WebRTC signaling --------------------------------------------------
+    //
+    // Before two browsers can talk directly they must swap an offer, an answer
+    // and ICE candidates. We just pass those along, unopened, to the other
+    // device, but only if it's on the same court: a stranger elsewhere
+    // can't start a connection with you.
+    socket.on('rtc:signal', async (payload) => {
+      try {
+        const to = payload?.to;
+        const data = payload?.data;
+        if (typeof to !== 'string' || !DEVICE_ID_RE.test(to) || to === deviceId) return;
+        if (!data || typeof data !== 'object' || typeof data.type !== 'string') return;
+        if (JSON.stringify(data).length > MAX_SIGNAL_BYTES) return;
+
+        const court = socket.data.court;
+        if (!court || !(await store.isPresent(court.id, to))) return;
+
+        io.to(deviceRoom(to)).emit('rtc:signal', { from: deviceId, data });
+      } catch (err) {
+        console.error('[rtc:signal]', err);
+      }
     });
 
     // Heartbeat: refresh our "last seen" score so we don't get pruned.

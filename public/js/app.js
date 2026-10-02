@@ -1,5 +1,6 @@
 import { getDeviceToken, rotateDeviceToken } from './identity.js';
 import { createTextSync } from './textSync.js';
+import { createPeerManager } from './rtc.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -8,7 +9,18 @@ const state = {
   court: null, // { id, kind, label }
   devices: [], // [{ id, session }], including ourselves
   text: null, // { by, updatedAt, expiresAt } of the latest save
+  links: new Map(), // peerId -> { state, route, rtt } for the WebRTC link
 };
+
+// Connect to everyone eagerly on small courts so the first file is instant.
+// On a big court (a whole office behind one IP) connect only when needed.
+const EAGER_LINK_LIMIT = 6;
+
+// STUN/TURN servers come from the backend (see src/config.js). Fetched
+// before the socket exists so no signal can arrive before we're ready.
+const { iceServers } = await fetch('/api/rtc-config')
+  .then((r) => r.json())
+  .catch(() => ({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }));
 
 // ---- Socket.IO connection ----------------------------------------------
 
@@ -83,19 +95,66 @@ async function copyToClipboard(text) {
 // Refresh "clears in N min" now and then.
 setInterval(renderTextMeta, 30_000);
 
+// ---- Peer-to-peer links -----------------------------------------------------
+
+const peers = createPeerManager({
+  socket,
+  iceServers,
+  getMyId: () => state.you?.id,
+  onState: (peerId, { state: linkState, route }) => {
+    const prev = state.links.get(peerId) ?? {};
+    state.links.set(peerId, { ...prev, state: linkState, route });
+    renderDevices();
+  },
+  onMessage: (peerId, msg) => handlePeerMessage(peerId, msg),
+  log: rtcLog,
+});
+
+function handlePeerMessage(peerId, msg) {
+  switch (msg.type) {
+    // The data channel test: answer a ping straight back with a pong.
+    case 'ping':
+      toast(`🏸 ${deviceName(peerId)} sent a test rally over WebRTC`);
+      peers.send(peerId, { type: 'pong', sentAt: msg.sentAt });
+      break;
+    case 'pong': {
+      const link = state.links.get(peerId) ?? {};
+      state.links.set(peerId, { ...link, rtt: Math.round(performance.now() - msg.sentAt) });
+      renderDevices();
+      break;
+    }
+  }
+}
+
+async function testRally(peerId) {
+  try {
+    await peers.send(peerId, { type: 'ping', sentAt: performance.now() });
+  } catch (err) {
+    toast(`Couldn't reach ${deviceName(peerId)} (${err.message})`);
+  }
+}
+
+function syncPeers() {
+  const others = state.devices.filter((d) => d.id !== state.you?.id);
+  peers.syncDevices(state.devices, { eager: others.length <= EAGER_LINK_LIMIT });
+}
+
 // Full snapshot after joining a court.
 socket.on('court:state', ({ court, you, devices, text }) => {
+  if (state.court && state.court.id !== court.id) peers.closeAll(); // moved courts
   state.court = court;
   state.you = you;
   state.devices = devices;
   state.text = text;
   textSync.reset(text);
+  syncPeers();
   render();
 });
 
 // Someone arrived or left.
 socket.on('court:devices', (devices) => {
   state.devices = devices;
+  syncPeers();
   render();
 });
 
@@ -133,18 +192,69 @@ function render() {
   const me = state.devices.find((d) => d.id === state.you?.id);
   $('#you-name').textContent = me ? displayName(me) : '…';
 
+  renderDevices();
+  renderTextMeta();
+}
+
+const ROUTE_LABELS = {
+  host: 'direct on your network',
+  srflx: 'direct via STUN',
+  prflx: 'direct via STUN',
+  relay: 'relayed through TURN',
+};
+
+function linkLabel(link) {
+  switch (link?.state) {
+    case 'connecting':
+      return 'Linking…';
+    case 'reconnecting':
+      return 'Link interrupted, retrying…';
+    case 'connected':
+      return `Linked · ${ROUTE_LABELS[link.route] ?? 'peer-to-peer'}${link.rtt != null ? ` · ${link.rtt} ms return` : ''}`;
+    case 'failed':
+      return "Couldn't link directly (this network may need a TURN server)";
+    default:
+      return 'Not linked yet';
+  }
+}
+
+function renderDevices() {
   const others = state.devices.filter((d) => d.id !== state.you?.id);
   $('#device-count').textContent = String(state.devices.length);
   $('#devices-empty').hidden = others.length > 0;
 
-  const list = $('#device-list');
-  list.replaceChildren(
+  $('#device-list').replaceChildren(
     ...others.map((d) => {
-      const li = document.createElement('li');
-      li.className = 'device';
-      li.textContent = displayName(d); // textContent, never innerHTML, for anything from the network
+      const li = el('li', { className: 'device' });
+      // textContent (never innerHTML) for anything that came over the network.
+      const info = el('div', { className: 'device__info' });
+      info.append(el('strong', { textContent: displayName(d) }));
+      info.append(el('span', { className: 'muted device__link', textContent: linkLabel(state.links.get(d.id)) }));
+
+      const ping = el('button', { type: 'button', textContent: 'Test rally' });
+      ping.addEventListener('click', () => testRally(d.id));
+
+      li.append(info, ping);
       return li;
     }),
   );
-  renderTextMeta();
+}
+
+// ---- Small DOM helpers ------------------------------------------------------
+
+function el(tag, props = {}) {
+  return Object.assign(document.createElement(tag), props);
+}
+
+function toast(text) {
+  const t = el('div', { className: 'toast', textContent: text });
+  $('#toasts').append(t);
+  setTimeout(() => t.remove(), 4000);
+}
+
+function rtcLog(text) {
+  const time = new Date().toLocaleTimeString([], { hour12: false });
+  const list = $('#rtc-log');
+  list.append(el('li', { textContent: `${time}  ${text}` }));
+  while (list.children.length > 200) list.firstChild.remove();
 }

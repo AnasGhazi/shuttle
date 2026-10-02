@@ -41,6 +41,14 @@ async function createShuttleServer(config) {
 
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
+  // ICE servers for WebRTC (see config.js). Served from the backend so TURN
+  // credentials can change without touching frontend code.
+  app.get('/api/rtc-config', (_req, res) => {
+    const iceServers = [{ urls: config.stunUrls }];
+    if (config.turn) iceServers.push(config.turn);
+    res.set('Cache-Control', 'no-store').json({ iceServers });
+  });
+
   // Used by load balancers / uptime checks.
   app.get('/healthz', async (_req, res) => {
     try {

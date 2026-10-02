@@ -18,7 +18,12 @@ body { margin: 0; background: var(--bg); color: var(--text); }
 .status { font-size: 0.85rem; }
 .status--offline { opacity: 0.7; }
 .device-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.device { padding: 10px 12px; border: 1px solid #dde5e0; border-radius: 12px; }
+.device { padding: 10px 12px; border: 1px solid #dde5e0; border-radius: 12px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.device__info { display: grid; gap: 2px; min-width: 0; }
+.device__link { font-size: 0.85rem; }
 textarea { width: 100%; font: inherit; padding: 10px; border: 1px solid #dde5e0; border-radius: 12px; resize: vertical; }
 .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
 button { font: inherit; padding: 6px 14px; border-radius: 999px; border: 1px solid var(--green); background: #fff; color: var(--green); cursor: pointer; }
+.log { font: 12px/1.5 ui-monospace, Menlo, monospace; max-height: 240px; overflow: auto; padding-left: 0; list-style: none; }
+.toasts { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); display: grid; gap: 8px; z-index: 10; }
+.toast { background: #17231c; color: #fff; padding: 10px 16px; border-radius: 12px; }
