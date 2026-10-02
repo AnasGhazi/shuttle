@@ -1,0 +1,31 @@
+# Render Blueprint: one click creates the web service *and* its Redis.
+#   Render dashboard -> New -> Blueprint -> pick this GitHub repo.
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: shuttle
+    runtime: node
+    plan: free            # sleeps after ~15 min idle; first visit then takes ~1 min
+    region: oregon        # must match the Redis region below
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      # Render puts one proxy in front of the app. Verify after deploying:
+      # https://<your-app>.onrender.com/api/whoami must show YOUR public IP.
+      - key: TRUST_PROXY
+        value: "1"
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: shuttle-redis
+          property: connectionString
+
+  # Render's managed Redis-compatible store. Shuttle's data is all short-lived,
+  # so the free plan (small, no persistence) is plenty.
+  - type: keyvalue
+    name: shuttle-redis
+    plan: free
+    region: oregon
+    maxmemoryPolicy: volatile-lru   # every Shuttle key has a TTL
+    ipAllowList: []                 # only reachable from your Render services

@@ -4,6 +4,28 @@ Shuttle is one Node.js process plus Redis. The server only relays small
 messages (presence, text, WebRTC signaling); files go device to device. A
 single small instance handles a lot of users.
 
+## Fastest path: Render (free tier, no Docker needed)
+
+1. Push this repo to GitHub.
+2. In the Render dashboard: **New → Blueprint**, then pick the repo. The
+   [render.yaml](../render.yaml) blueprint creates the `shuttle` web
+   service and a `shuttle-redis` Key Value (Redis-compatible) instance in
+   the same region, and wires `REDIS_URL` between them.
+3. When it's live, open `https://<your-app>.onrender.com/api/whoami` on your
+   phone. `ip` must be your real public IP (see "Trusted proxy" below). If it
+   shows a Render/Cloudflare address instead, change `TRUST_PROXY` to `2` in
+   the service's Environment settings.
+4. Open the app on your phone and laptop on the same Wi-Fi. They should land
+   on the same court.
+
+Free plan notes: the web service sleeps after about 15 minutes without traffic,
+so the first visit afterwards takes about a minute. The free Key Value is
+small and not persisted, which suits Shuttle: everything expires anyway.
+Every push to `main` redeploys.
+
+Other good fits: Railway (one-click Redis, no free tier) and Fly.io (pair
+with Upstash Redis). Both work with the settings below.
+
 ## Checklist
 
 1. **Redis 7+** reachable through `REDIS_URL` (TLS: `rediss://`).
@@ -92,7 +114,12 @@ Graceful shutdown is built in. On `SIGTERM` the server disconnects sockets,
 removes them from their courts, and closes Redis. Clients reconnect to
 another instance automatically.
 
-## Docker
+## Docker (optional)
+
+You don't need Docker to deploy: Render, Railway and Fly build on their own
+servers. The Dockerfile is for hosts that want an image, or if you install
+Docker yourself (on a Mac it always runs inside a small Linux VM, e.g.
+Docker Desktop or Colima).
 
 ```bash
 docker build -t shuttle .

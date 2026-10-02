@@ -16,10 +16,16 @@ Sharing is a **serve**, the room is **the court**, receiving is a **return**.
 
 ```bash
 npm install
-docker compose up -d redis     # or: brew install redis && redis-server
-npm run dev                    # http://localhost:3000
+npm run redis                  # terminal 1: local Redis (needs redis-server on your PATH)
+npm run dev                    # terminal 2: http://localhost:3000
 npm test                       # unit + integration tests (integration needs Redis)
 ```
+
+No Redis yet? `brew install redis` works on most Macs. On a macOS version
+too new for Homebrew's prebuilt packages, build it from source in a minute:
+`curl -LO https://download.redis.io/redis-stable.tar.gz && tar xzf redis-stable.tar.gz && make -C redis-stable -j8`
+and copy `redis-stable/src/redis-server` and `redis-cli` onto your PATH.
+If you already use Docker: `docker compose up -d redis`.
 
 The server prints a LAN address such as `http://192.168.1.20:3000`. Open it
 on your phone (same Wi-Fi) and both devices appear on the "Local network
@@ -158,7 +164,11 @@ docs/DEPLOYMENT.md  env vars, proxies, hosted Redis, scaling, TURN
 
 ## Deploying
 
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). In short: set `REDIS_URL`, set
+Quickest: push to GitHub, then in Render choose **New → Blueprint** and
+pick the repo. [render.yaml](render.yaml) creates the web service and its
+Redis together. No Docker needed on your machine.
+
+Full guide: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). In short: set `REDIS_URL`, set
 `TRUST_PROXY` for your host and check it at `/api/whoami`, serve over
 HTTPS, enable sticky sessions if you run several instances, and add TURN
 if devices on different networks can't connect.

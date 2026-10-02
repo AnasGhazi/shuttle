@@ -41,7 +41,7 @@ main().catch((err) => {
   const detail = err.message || err.errors?.map((e) => e.message).join('; ') || err.code;
   console.error('Failed to start Shuttle:', detail);
   if (err.code === 'ECONNREFUSED') {
-    console.error('Is Redis running? Try: docker compose up -d redis');
+    console.error('Is Redis running? Start it with: npm run redis');
   }
   process.exit(1);
 });

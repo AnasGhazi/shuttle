@@ -38,8 +38,8 @@ court ID; devices join a Socket.IO room per court; presence lives in Redis.
 **Run it:**
 ```bash
 npm install
-docker compose up -d redis      # or: brew install redis && redis-server
-npm test                        # unit tests + integration tests (if Redis is up)
+npm run redis                   # terminal 1: local Redis
+npm test                        # terminal 2: unit + integration tests
 npm run dev                     # restarts on file changes
 ```
 
@@ -78,8 +78,8 @@ instances behave like one.
 npm test                               # includes a two-instance test
 npm run dev
 # Optional: watch Redis while you type
-docker compose exec redis redis-cli monitor
-docker compose exec redis redis-cli --scan --pattern 'shuttle:*'
+redis-cli monitor
+redis-cli --scan --pattern 'shuttle:*'
 ```
 
 **Two-device checklist:**
