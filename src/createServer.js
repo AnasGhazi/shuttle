@@ -4,8 +4,9 @@ const http = require('node:http');
 const path = require('node:path');
 const express = require('express');
 const { Server } = require('socket.io');
+const { createAdapter } = require('@socket.io/redis-adapter');
 
-const { connectRedis } = require('./redis');
+const { connectRedis, connectDuplicate } = require('./redis');
 const { createStore } = require('./store');
 const { createClientIpResolver } = require('./clientIp');
 const { attachRealtime } = require('./realtime');
@@ -57,6 +58,14 @@ async function createShuttleServer(config) {
     maxHttpBufferSize: 256 * 1024,
   });
 
+  // The Redis adapter: when this instance emits to a room, the message is also
+  // published on Redis so every other instance delivers it to *its* sockets
+  // in that room. Without it, two devices connected to different instances
+  // (behind a load balancer) would never see each other.
+  const pubClient = await connectDuplicate(redis, 'pub');
+  const subClient = await connectDuplicate(redis, 'sub');
+  io.adapter(createAdapter(pubClient, subClient, { key: 'shuttle:socket.io' }));
+
   const realtime = attachRealtime(io, { store, clientIp, config });
 
   async function close() {
@@ -64,7 +73,7 @@ async function createShuttleServer(config) {
     // their courts), wait for that Redis work, then close Redis.
     await new Promise((resolve) => io.close(() => resolve()));
     await realtime.drain();
-    await redis.quit().catch(() => {});
+    await Promise.all([redis, pubClient, subClient].map((c) => c.quit().catch(() => {})));
   }
 
   return { app, httpServer, io, redis, store, close };

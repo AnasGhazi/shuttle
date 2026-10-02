@@ -63,8 +63,14 @@ function attachRealtime(io, { store, clientIp, config }) {
       // connection hasn't timed out yet, or a duplicated browser tab), the
       // newest connection wins. The old one is told why it's being dropped
       // so a duplicated tab can pick a fresh identity instead of fighting.
-      io.to(deviceRoom(deviceId)).emit('session:replaced');
-      io.in(deviceRoom(deviceId)).disconnectSockets(true);
+      //
+      // `.except(socket.id)` matters: with the Redis adapter this request is
+      // asynchronous and reaches every instance a moment later. By then the
+      // *new* socket has joined the device room too and would kick itself.
+      // (Every socket is automatically in a room named after its own id.)
+      const others = io.to(deviceRoom(deviceId)).except(socket.id);
+      others.emit('session:replaced');
+      others.disconnectSockets(true);
 
       const ip = clientIp(socket.request);
       socket.data.deviceId = deviceId;
@@ -119,6 +125,7 @@ function attachRealtime(io, { store, clientIp, config }) {
         court,
         you: { id: deviceId },
         devices: await store.listDevices(court.id),
+        text: await store.getText(court.id),
       });
       // Tell everyone else on the court about the new arrival.
       socket.to(courtRoom(court.id)).emit('court:devices', await store.listDevices(court.id));
@@ -127,6 +134,26 @@ function attachRealtime(io, { store, clientIp, config }) {
     // Client asks to join its court (sent right after every (re)connect).
     socket.on('court:join', () => {
       serial(() => joinCourt(describeCourt(socket.data.networkCourtId)));
+    });
+
+    // ---- Shared text ------------------------------------------------------
+    //
+    // The client sends its whole text (debounced while typing). We store it
+    // with a fresh version number, tell the sender which version it got (the
+    // "ack" callback), and broadcast it to everyone else on the court.
+    socket.on('text:update', (payload, ack) => {
+      const reply = typeof ack === 'function' ? ack : () => {};
+      const text = payload?.text;
+      if (typeof text !== 'string' || text.length > config.textMaxLength) {
+        return reply({ error: 'text-too-long' });
+      }
+      serial(async () => {
+        const court = socket.data.court;
+        if (!court) return reply({ error: 'not-on-court' });
+        const saved = await store.setText(court.id, text, deviceId);
+        reply({ ok: true, version: saved.version, expiresAt: saved.expiresAt });
+        socket.to(courtRoom(court.id)).emit('text:changed', saved);
+      });
     });
 
     // Heartbeat: refresh our "last seen" score so we don't get pruned.

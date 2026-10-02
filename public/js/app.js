@@ -1,4 +1,5 @@
 import { getDeviceToken, rotateDeviceToken } from './identity.js';
+import { createTextSync } from './textSync.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -6,6 +7,7 @@ const state = {
   you: null, // { id }
   court: null, // { id, kind, label }
   devices: [], // [{ id, session }], including ourselves
+  text: null, // { by, updatedAt, expiresAt } of the latest save
 };
 
 // ---- Socket.IO connection ----------------------------------------------
@@ -42,11 +44,52 @@ socket.on('connect_error', (err) => {
 // copies sessionStorage). Become a new device instead of fighting over it.
 socket.on('session:replaced', () => rotateDeviceToken());
 
+// ---- Shared text ----------------------------------------------------------
+
+const textarea = $('#court-text');
+const textSync = createTextSync({
+  socket,
+  textarea,
+  onRemoteText: (update) => {
+    state.text = update;
+    renderTextMeta();
+  },
+  onSaved: (saved) => {
+    state.text = { ...saved, by: state.you?.id, updatedAt: Date.now() };
+    renderTextMeta();
+  },
+  onError: (code) => {
+    $('#text-meta').textContent = code === 'text-too-long' ? 'Too long to serve.' : 'Not saved, retrying when you type again.';
+  },
+});
+
+$('#clear-text').addEventListener('click', () => textSync.set(''));
+$('#copy-text').addEventListener('click', async () => {
+  await copyToClipboard(textarea.value);
+  $('#copy-text').textContent = 'Copied!';
+  setTimeout(() => ($('#copy-text').textContent = 'Copy'), 1200);
+});
+
+async function copyToClipboard(text) {
+  // The modern Clipboard API only exists on https:// (or localhost). On a
+  // plain http://192.168.x.x page we fall back to the old select-and-copy.
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  textarea.select();
+  document.execCommand('copy');
+}
+
+// Refresh "clears in N min" now and then.
+setInterval(renderTextMeta, 30_000);
+
 // Full snapshot after joining a court.
-socket.on('court:state', ({ court, you, devices }) => {
+socket.on('court:state', ({ court, you, devices, text }) => {
   state.court = court;
   state.you = you;
   state.devices = devices;
+  state.text = text;
+  textSync.reset(text);
   render();
 });
 
@@ -68,6 +111,23 @@ function displayName(device) {
   return device.name || `Device ${device.id.slice(0, 4)}`;
 }
 
+function deviceName(id) {
+  const d = state.devices.find((x) => x.id === id);
+  return d ? displayName(d) : 'someone';
+}
+
+function renderTextMeta() {
+  const t = state.text;
+  const el = $('#text-meta');
+  if (!t?.expiresAt || !textarea.value) {
+    el.textContent = '';
+    return;
+  }
+  const mins = Math.max(1, Math.round((t.expiresAt - Date.now()) / 60_000));
+  const who = t.by === state.you?.id ? 'you' : deviceName(t.by);
+  el.textContent = `Served by ${who} · clears in ${mins} min`;
+}
+
 function render() {
   $('#court-label').textContent = state.court ? state.court.label : 'The court';
   const me = state.devices.find((d) => d.id === state.you?.id);
@@ -86,4 +146,5 @@ function render() {
       return li;
     }),
   );
+  renderTextMeta();
 }

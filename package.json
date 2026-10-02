@@ -16,6 +16,7 @@
     "redis:down": "docker compose down"
   },
   "dependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
     "express": "^5.2.1",
     "ipaddr.js": "^2.5.0",
     "proxy-addr": "^2.0.8",

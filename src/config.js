@@ -41,6 +41,11 @@ const config = {
   // up after a server instance crashes without running its disconnect handlers.
   presenceHeartbeatMs: int('PRESENCE_HEARTBEAT_MS', 20_000),
   presenceStaleMs: int('PRESENCE_STALE_MS', 60_000),
+
+  // Shared text disappears this long after the last edit.
+  textTtlS: int('TEXT_TTL_S', 30 * 60),
+  // Longest text a court can hold (characters).
+  textMaxLength: int('TEXT_MAX_LENGTH', 50_000),
 };
 
 module.exports = { config, parseTrustProxy };

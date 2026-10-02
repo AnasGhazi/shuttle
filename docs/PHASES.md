@@ -49,3 +49,45 @@ npm run dev                     # restarts on file changes
 - [ ] Close the phone tab: the laptop drops to 1 within a second or two.
 - [ ] Reload the phone: it comes back with the **same** device ID.
 - [ ] Stop Redis and restart the server: it exits with "Is Redis running?".
+
+---
+
+## Phase 2: shared text and the Redis adapter
+
+**What:** live text syncing stored in `shuttle:court:{id}:text` (30-min TTL,
+reset on every edit), plus `@socket.io/redis-adapter` so several server
+instances behave like one.
+
+**Why this way:**
+- **Versioned writes.** A tiny Lua script (`store.js`) saves the text and
+  bumps a version number in one atomic step. Clients ignore anything older
+  than what they have, and hold remote updates while you're typing
+  (`public/js/textSync.js`). Without this, two people typing at once end up
+  each looking at the *other* person's text.
+- **Acks with timeouts.** The sender learns its version through a Socket.IO
+  acknowledgement. `socket.timeout(5000)` makes sure the callback runs even if
+  the connection drops.
+- **Adapter.** Every `io.to(room).emit()` is also published on Redis, so a
+  phone on instance A and a laptop on instance B still see each other. One
+  gotcha this surfaced: adapter operations like `disconnectSockets()` are
+  async across the cluster, which is why the handshake uses
+  `.except(socket.id)`.
+
+**Run it:**
+```bash
+npm test                               # includes a two-instance test
+npm run dev
+# Optional: watch Redis while you type
+docker compose exec redis redis-cli monitor
+docker compose exec redis redis-cli --scan --pattern 'shuttle:*'
+```
+
+**Two-device checklist:**
+- [ ] Type on the phone: the laptop updates within half a second.
+- [ ] Type on both at once, then stop: both show the same final text.
+- [ ] Reload either device: the text is still there.
+- [ ] "Served by … · clears in 30 min" shows under the box.
+- [ ] `redis-cli ttl "shuttle:court:{lan}:text"` shows about 1800 and
+      resets when you type.
+- [ ] Multi-instance: `PORT=3001 npm start` in a second terminal, open
+      `:3000` on one device and `:3001` on the other. They still share text.

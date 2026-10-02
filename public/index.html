@@ -19,6 +19,16 @@
     </section>
 
     <section class="card">
+      <h2>Shared text</h2>
+      <textarea id="court-text" rows="6" placeholder="Type or paste here. Everyone on the court sees it live."></textarea>
+      <div class="row">
+        <button id="copy-text" type="button">Copy</button>
+        <button id="clear-text" type="button">Clear</button>
+        <span id="text-meta" class="muted"></span>
+      </div>
+    </section>
+
+    <section class="card">
       <h2>Players on court <span id="device-count" class="badge">0</span></h2>
       <ul id="device-list" class="device-list"></ul>
       <p id="devices-empty" class="muted">No one else here yet. Open Shuttle on another device on this Wi-Fi.</p>

@@ -34,6 +34,8 @@ async function startServer(overrides = {}) {
     trustProxy: ['loopback'],
     presenceHeartbeatMs: 20_000,
     presenceStaleMs: 60_000,
+    textTtlS: 1800,
+    textMaxLength: 50_000,
     ...overrides,
   });
   await new Promise((resolve) => server.httpServer.listen(0, '127.0.0.1', resolve));

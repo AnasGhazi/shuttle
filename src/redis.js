@@ -39,4 +39,16 @@ async function connectRedis(url) {
   return client;
 }
 
-module.exports = { connectRedis };
+/**
+ * A second connection with the same settings. The Socket.IO adapter needs two:
+ * a connection in "subscriber" mode can't run normal commands, so publishing
+ * and subscribing each get their own.
+ */
+async function connectDuplicate(client, label) {
+  const dup = client.duplicate();
+  dup.on('error', (err) => console.error(`[redis:${label}]`, err.message));
+  await dup.connect();
+  return dup;
+}
+
+module.exports = { connectRedis, connectDuplicate };
