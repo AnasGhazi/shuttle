@@ -84,7 +84,16 @@
           <span class="status-pill__dot"></span>
           <span id="players-label">Connecting…</span>
         </button>
-        <span class="you">You're <strong id="you-name">…</strong></span>
+        <span class="you">
+          You're
+          <button id="you-name" class="you__name" type="button" title="Change your name">…</button>
+          <form id="rename-form" class="rename" hidden autocomplete="off">
+            <label class="visually-hidden" for="rename-input">Your name</label>
+            <input id="rename-input" class="rename__input" maxlength="32" required>
+            <button class="btn btn--primary btn--small" type="submit">Save</button>
+            <button id="rename-cancel" class="link-btn" type="button">Cancel</button>
+          </form>
+        </span>
       </div>
 
       <section id="players-panel" class="card players" hidden aria-label="Players on this court">
@@ -134,9 +143,9 @@
 
       <p id="hint" class="hint">Nothing on the court yet. Serve something!</p>
 
-      <section id="rallies" class="rallies" hidden aria-label="Transfers">
-        <h2 class="section-title">Rallies</h2>
-        <ul id="transfer-list" class="transfers"></ul>
+      <section id="shelf" class="shelf" hidden aria-labelledby="shelf-heading">
+        <h2 id="shelf-heading" class="section-title">On the court</h2>
+        <ul id="file-list" class="transfers"></ul>
       </section>
 
       <section class="card private" aria-labelledby="code-heading">

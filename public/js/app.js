@@ -13,7 +13,7 @@
 import { getDeviceToken, rotateDeviceToken } from './identity.js';
 import { createTextSync } from './textSync.js';
 import { createPeerManager } from './rtc.js';
-import { createTransfers } from './transfer.js';
+import { createTransfers, randomId, MAX_FILE_BYTES } from './transfer.js';
 import { flyShuttle } from './shuttle.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -24,7 +24,12 @@ const state = {
   devices: [], // [{ id, name, session }], including ourselves
   text: null, // { by, updatedAt, expiresAt } of the latest save
   links: new Map(), // peerId -> { state, route, rtt } for the WebRTC link
+  files: [], // files on the court: [{ id, name, size, mime, owner, to, servedAt }]
 };
+
+// Names of everyone we've seen, so a downloaded file can still say who it
+// came from after they leave.
+const knownNames = new Map();
 
 // Connect to everyone eagerly on small courts so the first file is instant.
 // On a big court (a whole office behind one IP) connect only when needed.
@@ -154,27 +159,53 @@ socket.on('connect_error', (err) => {
 socket.on('session:replaced', () => rotateDeviceToken());
 
 // Full snapshot after joining a court.
-socket.on('court:state', ({ court, you, devices, text }) => {
+socket.on('court:state', ({ court, you, devices, text, files }) => {
   if (state.court && state.court.id !== court.id) {
     peers.closeAll(); // moved courts: links to the old court's devices go
     state.links.clear();
+    stopServingAll(); // your files were offered to the old court only
   }
   state.court = court;
   state.you = you;
+  rememberNames(devices);
   state.devices = devices;
   state.text = text;
+  state.files = files ?? [];
   saveCourt(court);
   textSync.reset(text);
+  syncPeers();
+  reconcileUploads();
+  applyPreferredName();
+  render();
+});
+
+// Someone arrived, left, or renamed themselves.
+socket.on('court:devices', (devices) => {
+  rememberNames(devices);
+  state.devices = devices;
+  const me = devices.find((d) => d.id === state.you?.id);
+  if (me?.name && state.you) state.you.name = me.name;
   syncPeers();
   render();
 });
 
-// Someone arrived or left.
-socket.on('court:devices', (devices) => {
-  state.devices = devices;
-  syncPeers();
-  render();
+// The court's file list changed (someone served or removed a file, or left).
+socket.on('files:changed', (files) => {
+  const before = new Set(state.files.map((f) => f.id));
+  state.files = files;
+  for (const f of files) {
+    if (!before.has(f.id) && f.owner !== state.you?.id) {
+      toast(`${deviceName(f.owner)} served ${f.name}${f.to ? ' to you' : ''}`);
+      flyShuttle('return');
+    }
+  }
+  renderShelf();
+  renderEmptyState();
 });
+
+function rememberNames(devices) {
+  for (const d of devices) if (d.name) knownNames.set(d.id, d.name);
+}
 
 // =============================================================================
 //  Shared text
@@ -244,14 +275,23 @@ const peers = createPeerManager({
   log: rtcLog,
 });
 
-const transfers = createTransfers({ peers, onUpdate: () => renderRallies() });
+const transfers = createTransfers({
+  peers,
+  // Someone asked for a file: hand it over if we serve it and they may have it.
+  getUpload: (fileId, peerId) => {
+    const upload = uploads.get(fileId);
+    if (!upload || (upload.to && upload.to !== peerId)) return null;
+    return upload.file;
+  },
+  onUpdate: () => renderShelf(),
+  onComplete: (t) => {
+    flyShuttle('return');
+    saveDownload(t);
+  },
+});
 
 function handlePeerMessage(peerId, msg) {
   if (typeof msg.type === 'string' && msg.type.startsWith('file-')) {
-    if (msg.type === 'file-offer') {
-      toast(`${deviceName(peerId)} is serving you a file`);
-      flyShuttle('return');
-    }
     transfers.handleMessage(peerId, msg);
     return;
   }
@@ -293,6 +333,59 @@ function syncPeers() {
 // Files you drop (or browse to) wait in the drop zone ("staged") until you
 // choose who gets them: Broadcast = everyone, Send to one device = pick one.
 // Pressing either with nothing staged opens the file picker first.
+//
+// Serving puts the file "on the court": the server lists its name and size
+// for everyone (or just the one device), and each of them can download it
+// from this browser whenever they like. The file never goes to the server,
+// so it's only downloadable while this tab stays open.
+
+const uploads = new Map(); // fileId -> { file, to } for files this tab serves
+
+const FILE_ERRORS = {
+  'too-large': 'is too large to serve (2 GB max)',
+  'court-full': "couldn't be served: the court already has 50 files",
+  'not-on-court': "couldn't be served: that device left the court",
+};
+
+function publish(id) {
+  const { file, to } = uploads.get(id);
+  return request('files:add', { id, name: file.name, size: file.size, mime: file.type, to: to ?? undefined });
+}
+
+/** After (re)joining: re-list files this tab still has, drop ones it doesn't. */
+function reconcileUploads() {
+  const mine = new Set(state.files.filter((f) => f.owner === state.you?.id).map((f) => f.id));
+  for (const id of uploads.keys()) {
+    if (!mine.has(id)) {
+      publish(id).then((ack) => {
+        if (ack?.error) stopServing(id);
+      });
+    }
+  }
+  // Listed under our name but not in this tab (e.g. from before a reload).
+  for (const id of mine) if (!uploads.has(id)) request('files:remove', { id });
+}
+
+function stopServing(id) {
+  uploads.delete(id);
+  transfers.cancelUploads(id);
+  request('files:remove', { id });
+}
+
+function stopServingAll() {
+  for (const id of [...uploads.keys()]) {
+    uploads.delete(id);
+    transfers.cancelUploads(id);
+  }
+}
+
+/** Save a finished download to the device (the browser's normal download). */
+function saveDownload(t) {
+  const a = el('a', { href: t.url, download: t.name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
 
 let staged = []; // File objects waiting to be served
 let afterPick = null; // after the file picker closes: null = just stage, 'all', or a device id
@@ -322,19 +415,31 @@ function unstage(index) {
   renderStaged();
 }
 
-function serveFiles(files, target) {
-  const targets = target ? [target] : otherDevices().map((d) => d.id);
+async function serveFiles(files, target) {
   if (files.length === 0) return;
-  if (targets.length === 0) return toast('No one else is on the court yet.');
   flyShuttle('serve');
-  // "Everyone" is simply one transfer per device, each accepted separately.
-  for (const file of files) for (const peerId of targets) transfers.sendFile(peerId, file);
+  for (const file of files) {
+    if (file.size > MAX_FILE_BYTES) {
+      toast(`${file.name} ${FILE_ERRORS['too-large']}`);
+      continue;
+    }
+    const id = randomId();
+    uploads.set(id, { file, to: target });
+    const ack = await publish(id);
+    if (ack?.error) {
+      uploads.delete(id);
+      toast(`${file.name} ${FILE_ERRORS[ack.error] ?? "couldn't be served"}`);
+    }
+  }
 }
 
-/** Serve the staged files (or pick some first) to one device or everyone. */
+/**
+ * Serve the staged files (or pick some first) to one device, or to the whole
+ * court (target null). Court files wait for anyone who joins later, too.
+ */
 function serveTo(target) {
   closePicker();
-  if (otherDevices().length === 0) return toast('No one else is on the court yet.');
+  if (target && !otherDevices().some((d) => d.id === target)) return toast('That device left the court.');
   if (staged.length === 0) return openFilePicker(target ?? 'all');
   serveFiles(staged, target);
   staged = [];
@@ -391,6 +496,68 @@ document.addEventListener('drop', (e) => {
   if (!e.dataTransfer?.files.length) return;
   e.preventDefault();
   stageFiles([...e.dataTransfer.files]);
+});
+
+// ---- Naming yourself -------------------------------------------------------------
+//
+// Tap your name to change it. The choice is remembered in this browser
+// (localStorage), so new tabs and later visits use it too.
+
+const NAME_KEY = 'shuttle.name';
+const NAME_ERRORS = {
+  'name-taken': 'Someone on this court already has that name.',
+  'bad-name': 'Names need 1 to 32 characters.',
+};
+
+function preferredName() {
+  try {
+    return localStorage.getItem(NAME_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function applyPreferredName() {
+  const name = preferredName();
+  if (!name || name === state.you?.name) return;
+  request('device:rename', { name }).then((ack) => {
+    if (ack?.ok && state.you) {
+      state.you.name = ack.name;
+      renderHeader();
+    }
+  });
+}
+
+const renameForm = $('#rename-form');
+const renameInput = $('#rename-input');
+
+function showRename(open) {
+  renameForm.hidden = !open;
+  $('#you-name').hidden = open;
+  if (open) {
+    renameInput.value = state.you?.name ?? '';
+    renameInput.focus();
+    renameInput.select();
+  }
+}
+
+$('#you-name').addEventListener('click', () => showRename(true));
+$('#rename-cancel').addEventListener('click', () => showRename(false));
+renameInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') showRename(false);
+});
+renameForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const ack = await request('device:rename', { name: renameInput.value });
+  if (ack?.error) return toast(NAME_ERRORS[ack.error] ?? "Couldn't change your name.");
+  state.you.name = ack.name;
+  try {
+    localStorage.setItem(NAME_KEY, ack.name);
+  } catch {
+    // Private mode etc.: the name still applies to this session.
+  }
+  showRename(false);
+  renderHeader();
 });
 
 // ---- Players pill ----------------------------------------------------------------
@@ -460,7 +627,8 @@ function displayName(device) {
 }
 
 function deviceName(id) {
-  return displayName(state.devices.find((d) => d.id === id)) || 'someone';
+  const d = state.devices.find((x) => x.id === id);
+  return d ? displayName(d) : knownNames.get(id) ?? 'someone';
 }
 
 function initials(name) {
@@ -485,19 +653,20 @@ function render() {
   renderCourt();
   renderPlayers();
   renderCodeCard();
-  renderRallies();
+  renderShelf();
 }
 
 function renderHeader() {
   $('#court-label').textContent = state.court?.label ?? 'Finding your court…';
   $('#you-name').textContent = state.you?.name ?? '…';
+  $('#you-name').setAttribute('aria-label', `Your name: ${state.you?.name ?? ''}. Change it`);
   renderStatusPill();
 }
 
 // The line under the buttons: the empty-court invitation, or a reminder of
 // how files travel once something is happening.
 function renderEmptyState() {
-  const empty = !textarea.value && transfers.list().length === 0 && staged.length === 0;
+  const empty = !textarea.value && state.files.length === 0 && transfers.list().length === 0 && staged.length === 0;
   $('#hint').textContent = empty
     ? 'Nothing on the court yet. Serve something!'
     : 'Files fly device to device and never touch the server.';
@@ -600,84 +769,115 @@ function renderCodeCard() {
   }
 }
 
-function transferStatus(t) {
+function progress(t) {
   const pct = t.size ? Math.floor((t.bytes / t.size) * 100) : 100;
-  const seconds = t.startedAt ? (performance.now() - t.startedAt) / 1000 : 0;
+  const seconds = (performance.now() - t.startedAt) / 1000;
   const speed = seconds > 0.5 && t.bytes ? ` · ${formatBytes(t.bytes / seconds)}/s` : '';
-  const why = t.error ? ` (${t.error})` : '';
-  switch (t.state) {
-    case 'offered':
-      return 'is serving you this file. Return it?';
-    case 'waiting':
-      return 'Waiting for them to accept…';
-    case 'sending':
-      return `Serving… ${pct}%${speed}`;
-    case 'receiving':
-      return t.bytes ? `Receiving… ${pct}%${speed}` : 'Accepted, here it comes…';
-    case 'confirming':
-      return 'Sent, waiting for the return…';
-    case 'done':
-      return t.direction === 'out' ? 'Returned ✓ They have it.' : 'Received ✓';
-    case 'declined':
-      return `Declined${why}`;
-    case 'cancelled':
-      return `Cancelled${why}`;
-    default:
-      return `Failed${why}`;
-  }
+  return `${pct}%${speed}`;
 }
 
-function renderRallies() {
-  const items = transfers.list().reverse(); // newest first
-  $('#rallies').hidden = items.length === 0;
-  renderEmptyState();
+function progressBar(t) {
+  const bar = el('div', { className: 'bar', role: 'progressbar' });
+  const pct = t.size ? (t.bytes / t.size) * 100 : 100;
+  bar.setAttribute('aria-valuenow', String(Math.round(pct)));
+  const fill = el('div', { className: 'bar__fill' });
+  fill.style.width = `${pct}%`;
+  bar.append(fill);
+  return bar;
+}
 
-  $('#transfer-list').replaceChildren(
-    ...items.map((t) => {
-      const li = el('li', { className: `transfer transfer--${t.state}` });
-      const who = deviceName(t.peerId);
-      const title = el('div', { className: 'transfer__title' });
-      title.append(
-        el('span', { className: 'transfer__dir', textContent: t.direction === 'out' ? '↗' : '↙' }),
-        el('span', { className: 'transfer__name', textContent: t.name }),
-        el('span', { className: 'transfer__meta', textContent: `${formatBytes(t.size)} · ${t.direction === 'out' ? `to ${who}` : `from ${who}`}` }),
-      );
+/**
+ * The court's files. Everyone's served files are listed with a Download
+ * button; your own show who's downloading them. Files you downloaded stay
+ * listed (to save again) even after their owner leaves.
+ */
+function renderShelf() {
+  const me = state.you?.id;
+  const entries = [...state.files].reverse(); // newest first
+  const listed = new Set(entries.map((f) => f.id));
+  const kept = new Map();
+  for (const t of transfers.list()) {
+    if (t.direction === 'in' && t.state === 'done' && !listed.has(t.fileId)) {
+      kept.set(t.fileId, { id: t.fileId, name: t.name, size: t.size, mime: t.mime, owner: t.peerId, gone: true });
+    }
+  }
+  const all = [...entries, ...kept.values()];
+  $('#shelf').hidden = all.length === 0;
+  $('#file-list').replaceChildren(...all.map((f) => (f.owner === me ? renderOwnFile(f) : renderCourtFile(f))));
+}
 
-      // Progress bar: an outer track and an inner fill whose width we set.
-      const bar = el('div', { className: 'bar', role: 'progressbar' });
-      const pct = t.size ? (t.bytes / t.size) * 100 : t.state === 'done' ? 100 : 0;
-      bar.setAttribute('aria-valuenow', String(Math.round(pct)));
-      const fill = el('div', { className: 'bar__fill' });
-      fill.style.width = `${pct}%`;
-      bar.append(fill);
-
-      const status = el('div', { className: 'transfer__status', textContent: transferStatus(t) });
-      const actions = el('div', { className: 'transfer__actions' });
-
-      if (t.state === 'offered') {
-        actions.append(
-          button('Accept', () => transfers.accept(t.id), 'btn btn--primary btn--small'),
-          button('Decline', () => transfers.decline(t.id), 'btn btn--outline btn--small'),
-        );
-      } else if (['waiting', 'sending', 'receiving', 'confirming'].includes(t.state)) {
-        actions.append(button('Cancel', () => transfers.cancel(t.id), 'btn btn--outline btn--small'));
-      } else {
-        if (t.direction === 'in' && t.state === 'done') {
-          // A blob: URL plus the `download` attribute saves it under its name.
-          actions.append(el('a', { href: t.url, download: t.name, className: 'btn btn--primary btn--small', textContent: 'Save file' }));
-        }
-        actions.append(button('Dismiss', () => transfers.dismiss(t.id), 'link-btn'));
-      }
-
-      // No bar until bytes can move: before acceptance it would just be noise.
-      if (t.state === 'offered' || t.state === 'waiting') li.append(title, status, actions);
-      else li.append(title, bar, status, actions);
-      if (t.direction === 'in' && t.state === 'done' && t.mime.startsWith('image/')) {
-        li.append(el('img', { src: t.url, alt: t.name, className: 'transfer__preview' }));
-      }
-      return li;
-    }),
+function fileTitle(f, who) {
+  const title = el('div', { className: 'transfer__title' });
+  title.append(
+    el('span', { className: 'transfer__dir', textContent: f.owner === state.you?.id ? '↗' : '↙' }),
+    el('span', { className: 'transfer__name', textContent: f.name }),
+    el('span', { className: 'transfer__meta', textContent: `${formatBytes(f.size)} · ${who}` }),
   );
+  return title;
+}
+
+/** A file someone else served: Download it, watch it arrive, save it. */
+function renderCourtFile(f) {
+  const owner = deviceName(f.owner);
+  const who = f.gone ? `from ${owner}, who left the court` : f.to ? `from ${owner}, just for you` : `served by ${owner}`;
+  const t = transfers.downloadOf(f.id);
+  const li = el('li', { className: `transfer transfer--${t?.state ?? 'new'}` });
+  const status = el('div', { className: 'transfer__status' });
+  const actions = el('div', { className: 'transfer__actions' });
+  li.append(fileTitle(f, who));
+
+  if (!t) {
+    actions.append(button('Download', () => transfers.download(f.owner, f), 'btn btn--primary btn--small'));
+  } else if (t.state === 'requested') {
+    status.textContent = `Asking ${owner} to send it…`;
+    actions.append(button('Cancel', () => transfers.cancel(t.id), 'btn btn--outline btn--small'));
+  } else if (t.state === 'receiving') {
+    li.append(progressBar(t));
+    status.textContent = `Downloading… ${progress(t)}`;
+    actions.append(button('Cancel', () => transfers.cancel(t.id), 'btn btn--outline btn--small'));
+  } else if (t.state === 'done') {
+    status.textContent = 'Downloaded ✓';
+    // A blob: URL plus the `download` attribute saves it under its name.
+    actions.append(el('a', { href: t.url, download: t.name, className: 'btn btn--outline btn--small', textContent: 'Save again' }));
+    if (f.gone) actions.append(button('Remove', () => transfers.dismiss(t.id), 'link-btn'));
+  } else {
+    status.textContent = `${t.state === 'cancelled' ? 'Cancelled' : 'Failed'}${t.error ? ` (${t.error})` : ''}`;
+    if (!f.gone) actions.append(button('Try again', () => transfers.download(f.owner, f), 'btn btn--primary btn--small'));
+  }
+
+  if (status.textContent) li.append(status);
+  li.append(actions);
+  if (t?.state === 'done' && t.mime.startsWith('image/')) {
+    li.append(el('img', { src: t.url, alt: t.name, className: 'transfer__preview' }));
+  }
+  return li;
+}
+
+/** A file you served: who's downloading it, and a way to take it back. */
+function renderOwnFile(f) {
+  const who = f.to ? `just for ${deviceName(f.to)}` : 'served by you';
+  const li = el('li', { className: 'transfer' });
+  li.append(fileTitle(f, who));
+
+  const sends = transfers.list().filter((t) => t.direction === 'out' && t.fileId === f.id);
+  const lines = el('div', { className: 'transfer__lines' });
+  for (const t of sends.filter((x) => x.state === 'sending' || x.state === 'confirming')) {
+    lines.append(
+      progressBar(t),
+      el('div', { className: 'transfer__status', textContent: `Sending to ${deviceName(t.peerId)}… ${progress(t)}` }),
+    );
+  }
+  const delivered = new Set(sends.filter((t) => t.state === 'done').map((t) => t.peerId));
+  const summary = delivered.size
+    ? `Downloaded by ${[...delivered].map(deviceName).join(', ')}`
+    : 'Waiting for someone to download it. Keep this tab open.';
+  lines.append(el('div', { className: 'transfer__status', textContent: summary }));
+  li.append(lines);
+
+  const actions = el('div', { className: 'transfer__actions' });
+  actions.append(button('Remove from court', () => stopServing(f.id), 'link-btn'));
+  li.append(actions);
+  return li;
 }
 
 // =============================================================================

@@ -5,6 +5,7 @@
  *
  *   shuttle:court:{<courtId>}:devices   ZSET   member=deviceId, score=last seen (ms)
  *   shuttle:court:{<courtId>}:text      HASH   { text, by, updatedAt, version }  TTL 30 min
+ *   shuttle:court:{<courtId>}:files     HASH   fileId -> JSON details            TTL 6 h, refreshed
  *   shuttle:device:<deviceId>           HASH   { name, session }                 TTL 24 h
  *   shuttle:code:<1234>                 STRING courtId                           TTL 30 min, refreshed while in use
  *   shuttle:ratelimit:code:<networkId>  STRING failed code guesses               TTL 60 s
@@ -22,10 +23,17 @@ const PREFIX = 'shuttle';
 const keys = {
   courtDevices: (courtId) => `${PREFIX}:court:{${courtId}}:devices`,
   courtText: (courtId) => `${PREFIX}:court:{${courtId}}:text`,
+  courtFiles: (courtId) => `${PREFIX}:court:{${courtId}}:files`,
   device: (deviceId) => `${PREFIX}:device:${deviceId}`,
   code: (code) => `${PREFIX}:code:${code}`,
   codeGuesses: (networkCourtId) => `${PREFIX}:ratelimit:code:${networkCourtId}`,
 };
+
+// Files on a court. Only their *details* live here (name, size, who has it);
+// the bytes stay in the owner's browser and travel peer-to-peer on download.
+// Entries vanish when the owner leaves; the TTL only cleans up after crashes.
+const FILES_TTL_S = 6 * 60 * 60;
+const MAX_FILES_PER_COURT = 50;
 
 const CODE_GUESS_WINDOW_S = 60;
 const CODE_MAX_GUESSES = 10; // wrong codes allowed per network per minute
@@ -205,6 +213,47 @@ function createStore(redis, { presenceStaleMs, textTtlS, codeTtlS }) {
       // INCR creates the counter at 1; EXPIRE ... NX sets the window only on
       // the first wrong guess, so it really resets 60 s after that guess.
       await redis.multi().incr(key).expire(key, CODE_GUESS_WINDOW_S, 'NX').exec();
+    },
+
+    // ---- Files on the court -------------------------------------------------
+
+    /** Returns false if the court already holds too many files. */
+    async addFile(courtId, entry) {
+      const key = keys.courtFiles(courtId);
+      if (!(await redis.hExists(key, entry.id)) && (await redis.hLen(key)) >= MAX_FILES_PER_COURT) return false;
+      await redis.multi().hSet(key, entry.id, JSON.stringify(entry)).expire(key, FILES_TTL_S).exec();
+      return true;
+    },
+
+    async getFile(courtId, fileId) {
+      const raw = await redis.hGet(keys.courtFiles(courtId), fileId);
+      return raw ? JSON.parse(raw) : null;
+    },
+
+    async removeFile(courtId, fileId) {
+      await redis.hDel(keys.courtFiles(courtId), fileId);
+    },
+
+    /** A device left: everything it was sharing goes with it. */
+    async removeFilesByOwner(courtId, owner) {
+      const all = await this.listFiles(courtId);
+      const ids = all.filter((f) => f.owner === owner).map((f) => f.id);
+      if (ids.length) await redis.hDel(keys.courtFiles(courtId), ids);
+    },
+
+    /** Every file entry on a court, oldest first. */
+    async listFiles(courtId) {
+      const hash = await redis.hGetAll(keys.courtFiles(courtId));
+      return Object.values(hash)
+        .map((raw) => {
+          try {
+            return JSON.parse(raw);
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.servedAt - b.servedAt);
     },
 
     async setText(courtId, text, by) {

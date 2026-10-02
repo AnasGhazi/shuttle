@@ -5,8 +5,10 @@ install: open the site on two devices and they're on the same **court**.
 
 - **Text** is synced live through the server and kept in Redis for 30
   minutes after the last edit.
-- **Files** fly peer-to-peer over WebRTC data channels. The server only
-  helps the browsers find each other and never sees the file.
+- **Files** are served *to the court*: everyone on it sees the file and can
+  download it, straight from the device that served it, over WebRTC. The
+  server only lists the file's name and size; it never sees the file. A file
+  stays downloadable while its owner keeps Shuttle open.
 - **Court codes** (4 digits) join devices that aren't grouped
   automatically: different networks, or IPv4 vs IPv6 on the same Wi-Fi.
 
@@ -69,7 +71,8 @@ The client IP comes from the socket address, or from `X-Forwarded-For`
 |---|---|---|---|
 | `shuttle:court:{<courtId>}:devices` | sorted set, score = last seen | 2 min, refreshed | presence |
 | `shuttle:court:{<courtId>}:text` | hash `{text, by, updatedAt, version}` | 30 min after last edit | shared text |
-| `shuttle:device:<deviceId>` | hash `{name, session}` | 24 h | device name |
+| `shuttle:court:{<courtId>}:files` | hash fileId → JSON `{name, size, mime, owner, to}` | 6 h (entries leave with their owner) | files on the court (details only) |
+| `shuttle:device:<deviceId>` | hash `{name, session}` | 24 h | device name (random, or one you chose) |
 | `shuttle:code:<1234>` | string → courtId | 30 min after the last player leaves | court codes |
 | `shuttle:ratelimit:code:<networkCourtId>` | counter | 60 s | wrong-code guesses |
 
@@ -83,13 +86,14 @@ increasing versions, so simultaneous edits converge.
 - The device with the smaller ID always sends the offer (no "glare").
 - Each connection attempt has an ID, so late ICE candidates from an old
   attempt are ignored. Candidates that arrive early are queued.
-- A `control` data channel carries JSON (pings, file offers). Each accepted
-  file gets its own `file:<id>` channel.
+- A `control` data channel carries JSON (pings, file requests). Each
+  download gets its own `file:<id>` channel.
+- Serving lists a file's details on the court (`files:add`, stored in
+  `shuttle:court:{id}:files`). Pressing **Download** sends the owner a
+  `file-request`; the owner streams it back. Nothing moves until someone asks.
 - Files go in 64 KB chunks. The sender pauses when more than 4 MB is
   queued (`bufferedAmount`) and resumes on `bufferedamountlow`, so large
-  files don't exhaust memory.
-- The receiver must accept first. Chunks are reassembled into a `Blob` with
-  a download link.
+  files don't exhaust memory. Chunks are reassembled into a `Blob` and saved.
 
 Open **Under the net** on the page to watch the signaling happen live.
 

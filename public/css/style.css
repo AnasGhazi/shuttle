@@ -122,8 +122,22 @@ button { cursor: pointer; }
 .status-pill:hover, .status-pill[aria-expanded='true'] { border-color: var(--blue); }
 .status-pill__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
 .status-pill--offline .status-pill__dot { background: #b8bfd6; }
-.you { font-size: 14px; color: var(--muted); }
-.you strong { color: var(--ink-2); font-weight: 600; }
+.you { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 14px; color: var(--muted); }
+.you__name {
+  padding: 2px 6px; margin: 0 -6px;
+  border: 0; border-radius: 8px; background: none;
+  color: var(--ink-2); font-weight: 600;
+  text-decoration: underline dotted var(--soft); text-underline-offset: 3px;
+}
+.you__name:hover { background: var(--wash); }
+.you__name[hidden], .rename[hidden] { display: none; }
+.rename { display: inline-flex; align-items: center; gap: 8px; }
+.rename__input {
+  width: 11em; height: 38px; padding: 0 14px;
+  border: 1.5px solid var(--blue); border-radius: 999px;
+  font-size: 14px; font-weight: 600; color: var(--ink);
+  outline: none;
+}
 
 .court-label {
   margin: 0;
@@ -277,6 +291,7 @@ textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 4px rgb(47 76 158 
 .btn--outline:hover, .btn--outline[aria-expanded='true'] { border-color: var(--blue); }
 .btn--small { height: 38px; padding: 0 16px; font-size: 14px; }
 
+.you__name:focus-visible, .rename__input:focus-visible,
 .btn:focus-visible, .link-btn:focus-visible, .status-pill:focus-visible, .dropzone:focus-visible,
 .dropzone__browse:focus-visible, .staged__remove:focus-visible, .code-input:focus-visible, summary:focus-visible {
   outline: 3px solid var(--accent);
@@ -287,7 +302,7 @@ textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 4px rgb(47 76 158 
 
 /* ---- Rallies (file transfers) ------------------------------------------- */
 
-.rallies[hidden] { display: none; }
+.shelf[hidden] { display: none; }
 .section-title { margin: 0 0 12px; font: 500 20px/1.2 var(--display); }
 .transfers { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
 .transfer {
@@ -297,7 +312,8 @@ textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 4px rgb(47 76 158 
   border-radius: 20px;
   background: #fff;
 }
-.transfer--offered { border-color: var(--blue); background: var(--wash); }
+.transfer--new { border-color: var(--blue); background: var(--wash); }
+.transfer__lines { display: grid; gap: 6px; }
 .transfer__title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; overflow-wrap: anywhere; }
 .transfer__dir { color: var(--blue); font-weight: 700; }
 .transfer__name { font-weight: 600; }

@@ -315,3 +315,41 @@ strict CSP stays and the app works offline on a LAN.
       chosen one gets the offer.
 - [ ] Tap **Players · N**: the list shows "Linked, direct on your network";
       **Test rally** shows the round trip.
+
+---
+
+## Files on the court, and naming yourself
+
+**What changed:** files used to be *pushed* to each device, which then had to
+accept an offer. Now serving a file puts it **on the court**:
+- Every player sees it under **On the court**, including people who join
+  later, and presses **Download** when they want it. No accept step.
+- **Send to one device** puts it on the court for that device only.
+- The bytes still travel peer-to-peer from the owner's browser, so a file is
+  downloadable while its owner keeps the tab open. When they leave, their files
+  leave the court. Anything you already downloaded stays listed so you can save
+  it again.
+- Tap your name (top right) to pick your own. Names are 1–32 characters and
+  unique on the court. The choice is remembered in the browser.
+
+**How it works:**
+- Server: `files:add` / `files:remove` store just the details in
+  `shuttle:court:{id}:files`. Each device gets its own filtered list
+  (`files:changed`) through its device room, so a file sent to one device
+  isn't visible to others. Files go when their owner leaves the court.
+- Browser: **Download** sends the owner `file-request {id, fileId}` over the
+  control channel. The owner checks it really serves that file *to you*, then
+  opens a `file:<id>` channel and streams it (same chunking and backpressure
+  as before). `file-unavailable` covers files that are gone.
+- `device:rename` cleans the name (no control characters, 1–32 characters)
+  and refuses duplicates on the court (case-insensitive).
+
+**Two-device checklist:**
+- [ ] Laptop: drop a photo, **Broadcast**. The phone lists it under "On the
+      court"; tap **Download** and it saves, with a preview.
+- [ ] Open a third device afterwards: it sees the photo too and can download it.
+- [ ] **Send to one device** → only that device lists it.
+- [ ] Close the laptop tab: the photo disappears for anyone who hadn't
+      downloaded it. Those who did keep "Save again".
+- [ ] Tap your name, change it: the other device's player list updates. Open
+      a new tab: it uses your name.

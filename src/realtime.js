@@ -26,6 +26,9 @@ const deviceRoom = (deviceId) => `device:${deviceId}`;
 const TOKEN_RE = /^[0-9a-f]{32}$/;
 const DEVICE_ID_RE = /^[0-9a-f]{16}$/;
 const CODE_RE = /^\d{4}$/;
+const FILE_ID_RE = /^[a-z0-9]{8,32}$/;
+// Receivers keep a download in memory, so a browser tab can't take much more.
+const MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024;
 // An SDP offer is a few KB; this leaves plenty of room.
 const MAX_SIGNAL_BYTES = 32 * 1024;
 function deviceIdFromToken(token) {
@@ -38,6 +41,22 @@ function describeCourt(courtId, code) {
   if (courtId === LOCAL_COURT_ID) return { id: courtId, kind: 'lan', label: 'Local network court' };
   if (courtId.startsWith('solo:')) return { id: courtId, kind: 'solo', label: 'Unrecognized network' };
   return { id: courtId, kind: 'network', label: 'Your network court' };
+}
+
+/**
+ * Tidy a user-chosen name: no control characters, single spaces, 1-32
+ * characters. Returns null if nothing usable is left.
+ */
+const MAX_NAME_LENGTH = 32;
+function cleanName(raw) {
+  if (typeof raw !== 'string') return null;
+  const name = raw
+    .normalize('NFC')
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (name.length === 0 || name.length > MAX_NAME_LENGTH) return null;
+  return name;
 }
 
 /** Call a Socket.IO acknowledgement if the client sent one. */
@@ -70,6 +89,28 @@ function attachRealtime(io, { store, clientIp, config }) {
 
   async function broadcastDevices(courtId) {
     io.to(courtRoom(courtId)).emit('court:devices', await store.listDevices(courtId));
+  }
+
+  /**
+   * The files a device may see: everything served to the whole court, plus
+   * anything sent just to it, plus its own. Entries from devices that are no
+   * longer present are hidden (their files left with them).
+   */
+  function visibleFiles(files, presentIds, deviceId) {
+    return files.filter(
+      (f) => presentIds.has(f.owner) && (!f.to || f.to === deviceId || f.owner === deviceId),
+    );
+  }
+
+  /**
+   * Send every device on a court its own view of the file list, through its
+   * device room. (Not fetchSockets(): with the Redis adapter that waits for a
+   * reply from every server instance, and stalls if one is shutting down.)
+   */
+  async function broadcastFiles(courtId) {
+    const [files, devices] = await Promise.all([store.listFiles(courtId), store.listDevices(courtId)]);
+    const present = new Set(devices.map((d) => d.id));
+    for (const d of devices) io.to(deviceRoom(d.id)).emit('files:changed', visibleFiles(files, present, d.id));
   }
 
   // ---- Handshake middleware: runs once per connection, before 'connection'.
@@ -139,8 +180,11 @@ function attachRealtime(io, { store, clientIp, config }) {
       // if a newer tab/reload has taken over, the device is still "here".
       if ((await store.getDeviceSession(deviceId)) === socket.id) {
         await store.removePresence(prev.id, deviceId);
+        // Its files lived in that browser tab, so they leave the court too.
+        await store.removeFilesByOwner(prev.id, deviceId);
       }
       await broadcastDevices(prev.id);
+      await broadcastFiles(prev.id);
     }
 
     async function joinCourt(court) {
@@ -164,6 +208,7 @@ function attachRealtime(io, { store, clientIp, config }) {
         you: { id: deviceId, name: socket.data.name },
         devices,
         text: await store.getText(court.id),
+        files: visibleFiles(await store.listFiles(court.id), new Set(devices.map((d) => d.id)), deviceId),
       });
       // Tell everyone else on the court about the new arrival.
       socket.to(courtRoom(court.id)).emit('court:devices', devices);
@@ -234,6 +279,81 @@ function attachRealtime(io, { store, clientIp, config }) {
       }, reply);
     });
 
+    // ---- Naming yourself ------------------------------------------------------
+    //
+    // Everyone starts with a random badminton name; this lets you pick your
+    // own. Names must be unique on the court so devices stay tellable apart.
+    socket.on('device:rename', (payload, ack) => {
+      const reply = replier(ack);
+      serial(async () => {
+        const name = cleanName(payload?.name);
+        if (!name) return reply({ error: 'bad-name' });
+        const court = socket.data.court;
+        if (court) {
+          const devices = await store.listDevices(court.id);
+          const taken = devices.some((d) => d.id !== deviceId && d.name?.toLowerCase() === name.toLowerCase());
+          if (taken) return reply({ error: 'name-taken' });
+        }
+        socket.data.name = name;
+        await store.renameDevice(deviceId, name);
+        reply({ ok: true, name });
+        if (court) await broadcastDevices(court.id);
+      }, reply);
+    });
+
+    // ---- Files on the court -------------------------------------------------
+    //
+    // Serving a file publishes its details to the court. The bytes never come
+    // here: when someone presses Download, their browser asks the owner's
+    // browser for it directly over WebRTC (see public/js/transfer.js).
+    socket.on('files:add', (payload, ack) => {
+      const reply = replier(ack);
+      serial(async () => {
+        const court = socket.data.court;
+        if (!court) return reply({ error: 'not-on-court' });
+        const { id, name, size, mime, to } = payload ?? {};
+        const valid =
+          typeof id === 'string' && FILE_ID_RE.test(id) &&
+          typeof name === 'string' && name.length > 0 && name.length <= 200 &&
+          Number.isSafeInteger(size) && size >= 0 &&
+          (mime === undefined || mime === '' || (typeof mime === 'string' && mime.length <= 100)) &&
+          (to === undefined || to === null || (typeof to === 'string' && DEVICE_ID_RE.test(to)));
+        if (!valid) return reply({ error: 'bad-file' });
+        if (size > MAX_FILE_BYTES) return reply({ error: 'too-large' });
+        if (to && !(await store.isPresent(court.id, to))) return reply({ error: 'not-on-court' });
+
+        const existing = await store.getFile(court.id, id);
+        if (existing && existing.owner !== deviceId) return reply({ error: 'bad-file' });
+
+        const entry = {
+          id,
+          name: name.replace(/[\\/]/g, '_'),
+          size,
+          mime: mime || '',
+          owner: deviceId,
+          to: to || null,
+          servedAt: existing?.servedAt ?? Date.now(),
+        };
+        if (!(await store.addFile(court.id, entry))) return reply({ error: 'court-full' });
+        reply({ ok: true });
+        await broadcastFiles(court.id);
+      }, reply);
+    });
+
+    socket.on('files:remove', (payload, ack) => {
+      const reply = replier(ack);
+      serial(async () => {
+        const court = socket.data.court;
+        const id = payload?.id;
+        if (!court || typeof id !== 'string') return reply({ error: 'bad-file' });
+        const entry = await store.getFile(court.id, id);
+        if (!entry || entry.owner !== deviceId) return reply({ error: 'bad-file' });
+        await store.removeFile(court.id, id);
+        reply({ ok: true });
+        await broadcastFiles(court.id);
+      }, reply);
+    });
+
     // ---- WebRTC signaling --------------------------------------------------
     //
     // Before two browsers can talk directly they must swap an offer, an answer
@@ -275,4 +395,4 @@ function attachRealtime(io, { store, clientIp, config }) {
   return { drain };
 }
 
-module.exports = { attachRealtime, deviceIdFromToken, courtRoom, deviceRoom };
+module.exports = { attachRealtime, deviceIdFromToken, courtRoom, deviceRoom, cleanName };

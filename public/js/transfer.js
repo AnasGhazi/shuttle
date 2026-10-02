@@ -1,26 +1,28 @@
 // =============================================================================
-//  transfer.js: sending files over WebRTC data channels
+//  transfer.js: downloading files from other devices over WebRTC
 // =============================================================================
 //
-//  The conversation for one file (control = the JSON 'control' channel):
+//  Files on the court are listed by the server (just their details). The
+//  bytes stay in the owner's browser until someone asks for them:
 //
-//      Sender                                   Receiver
-//      ------                                   --------
-//      control: file-offer {id,name,size,mime} ─►  shows Accept / Decline
-//                                           ◄─ control: file-accept {id}
-//      createDataChannel('file:<id>')  ════════►  ondatachannel (label file:<id>)
-//      chunk, chunk, chunk ... (binary)  ══════►  collect chunks, count bytes
-//                                                  all bytes in -> Blob -> link
-//                                           ◄─ control: file-received {id}
-//      "Returned!"
+//      Downloader                               Owner (has the File)
+//      ----------                               --------------------
+//      control: file-request {id, fileId}  ───►  looks up fileId
+//                                          ◄───  control: file-unavailable {id}
+//                                                (if it's gone, or not for you)
+//                                                otherwise:
+//      ondatachannel (label file:<id>) ◄════════ createDataChannel('file:<id>')
+//      collect chunks, count bytes     ◄════════ chunk, chunk, chunk ... (binary)
+//      all bytes in -> Blob -> save
+//      control: file-received {id}         ───►  "delivered"
 //
-//  Either side can send file-cancel {id} at any time. A decline is
-//  file-decline {id}.
+//  Either side can send file-cancel {id} at any time.
 //
-//  Why a channel per file? Every message on 'file:<id>' belongs to that file,
-//  so chunks need no headers, and several files can be in flight at once.
-//  Data channels added to an already-connected RTCPeerConnection open without
-//  another offer/answer round.
+//  Why a channel per download? Every message on 'file:<id>' belongs to that
+//  download, so chunks need no headers, and several downloads (from several
+//  people at once, even of the same file) can run in parallel. Data channels
+//  added to an already-connected RTCPeerConnection open without another
+//  offer/answer round.
 // =============================================================================
 
 // 64 KB is the widely safe message size: every browser can send and receive
@@ -33,12 +35,16 @@ const CHUNK_SIZE = 64 * 1024;
 const BUFFER_HIGH = 4 * 1024 * 1024;
 const BUFFER_LOW = 1 * 1024 * 1024;
 
-// The received file is held in memory until you download it.
+// A download is held in memory until you save it.
 export const MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
 
+// How long to wait for the owner to start sending before giving up.
+const REQUEST_TIMEOUT_MS = 20_000;
 const PROGRESS_INTERVAL_MS = 100;
+const ID_RE = /^[a-z0-9]{8,32}$/;
 
-const randomId = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(36)).join('').slice(0, 12);
+export const randomId = () =>
+  Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => (b % 36).toString(36)).join('');
 
 /** Wait for a one-off DOM event, failing if `failEvent` fires first. */
 function once(target, event, failEvent) {
@@ -61,24 +67,23 @@ function once(target, event, failEvent) {
 }
 
 /**
- * @param peers     the peer manager from rtc.js
- * @param onUpdate  (transfer) -> void, whenever a transfer changes
+ * @param peers       the peer manager from rtc.js
+ * @param getUpload   (fileId, peerId) -> File | null: a file we're serving,
+ *                    if that peer is allowed to have it
+ * @param onUpdate    (transfer) -> void, whenever a transfer changes
+ * @param onComplete  (transfer) -> void, when a download has fully arrived
  */
-export function createTransfers({ peers, onUpdate }) {
+export function createTransfers({ peers, getUpload, onUpdate, onComplete }) {
   /**
    * id -> transfer:
    * {
-   *   id, peerId, direction: 'out' | 'in',
+   *   id, fileId, peerId, direction: 'in' | 'out',
    *   name, size, mime,
-   *   state: 'offered'   (in: waiting for you to accept)
-   *        | 'waiting'   (out: waiting for them to accept)
-   *        | 'sending' | 'receiving'
+   *   state: 'requested'  (in: asked the owner, waiting for it to start)
+   *        | 'receiving' | 'sending'
    *        | 'confirming' (out: all sent, waiting for their "received")
-   *        | 'done' | 'declined' | 'cancelled' | 'failed',
-   *   bytes,      // progress so far
-   *   startedAt,  // for the speed readout
-   *   url,        // in: blob: URL to download, once done
-   *   error,
+   *        | 'done' | 'cancelled' | 'failed',
+   *   bytes, startedAt, url (in, once done), error,
    * }
    */
   const transfers = new Map();
@@ -96,6 +101,8 @@ export function createTransfers({ peers, onUpdate }) {
     onUpdate?.(t);
   }
 
+  const isActive = (t) => ['requested', 'receiving', 'sending', 'confirming'].includes(t.state);
+
   function finish(t, state, error) {
     t.state = state;
     if (error) t.error = error;
@@ -110,7 +117,7 @@ export function createTransfers({ peers, onUpdate }) {
         // close could overtake its file-received / file-cancel message (they
         // travel on different channels) and the sender would either report a
         // failure or try to send into a closed stream. So the receiver only
-        // stops listening and closes later as a fallback.
+        // stops listening, and closes later as a fallback.
         channel.onmessage = null;
         setTimeout(() => channel.readyState !== 'closed' && channel.close(), 5000);
       }
@@ -118,47 +125,104 @@ export function createTransfers({ peers, onUpdate }) {
     update(t);
   }
 
-  const isActive = (t) => ['offered', 'waiting', 'sending', 'receiving', 'confirming'].includes(t.state);
-
   // ---------------------------------------------------------------------------
-  //  Sending
+  //  Downloading (the side that pressed Download)
   // ---------------------------------------------------------------------------
 
-  /** Offer a file to one device. The transfer starts when they accept. */
-  async function sendFile(peerId, file) {
+  /** Ask `peerId` for one of the files it serves. `entry` is from the court list. */
+  function download(peerId, entry) {
     const t = {
       id: randomId(),
+      fileId: entry.id,
       peerId,
-      direction: 'out',
-      name: file.name,
-      size: file.size,
-      mime: file.type,
-      state: 'waiting',
+      direction: 'in',
+      name: entry.name,
+      size: entry.size,
+      mime: entry.mime || '',
+      state: 'requested',
       bytes: 0,
-      startedAt: null,
+      startedAt: performance.now(),
     };
     transfers.set(t.id, t);
-    files.set(t.id, file);
     update(t);
-    try {
-      await peers.send(peerId, { type: 'file-offer', id: t.id, name: t.name, size: t.size, mime: t.mime });
-    } catch (err) {
-      finish(t, 'failed', `couldn't reach them (${err.message})`);
+
+    if (t.size > MAX_FILE_BYTES) {
+      finish(t, 'failed', 'too large for a browser tab');
+      return t;
     }
+    peers.send(peerId, { type: 'file-request', id: t.id, fileId: entry.id }).catch((err) => {
+      if (isActive(t)) finish(t, 'failed', `couldn't reach them (${err.message})`);
+    });
+    setTimeout(() => {
+      if (t.state === 'requested') finish(t, 'failed', 'no answer');
+    }, REQUEST_TIMEOUT_MS);
     return t;
   }
+
+  /** A data channel the other side opened: is it one of our downloads? */
+  function handleChannel(peerId, channel) {
+    const id = channel.label.startsWith('file:') ? channel.label.slice(5) : null;
+    const t = id && transfers.get(id);
+    if (!t || t.direction !== 'in' || t.peerId !== peerId || t.state !== 'requested') {
+      channel.close(); // not something we asked for
+      return;
+    }
+    t.state = 'receiving';
+    t.startedAt = performance.now();
+    update(t);
+    channels.set(id, channel);
+    channel.binaryType = 'arraybuffer';
+
+    const chunks = [];
+    let received = 0;
+
+    const complete = () => {
+      // Glue the chunks back together. A Blob can be made from many pieces
+      // without copying them into one big buffer first.
+      const blob = new Blob(chunks, { type: t.mime || 'application/octet-stream' });
+      chunks.length = 0;
+      t.url = URL.createObjectURL(blob);
+      t.bytes = t.size;
+      finish(t, 'done');
+      peers.send(peerId, { type: 'file-received', id }).catch(() => {});
+      onComplete?.(t);
+    };
+
+    channel.onmessage = ({ data }) => {
+      if (t.state !== 'receiving' || !(data instanceof ArrayBuffer)) return;
+      chunks.push(data);
+      received += data.byteLength;
+      if (received > t.size) {
+        finish(t, 'failed', 'received more data than announced');
+        peers.send(peerId, { type: 'file-cancel', id }).catch(() => {});
+        return;
+      }
+      t.bytes = received;
+      update(t, { progressOnly: true });
+      if (received === t.size) complete();
+    };
+    channel.onclose = () => {
+      if (t.state === 'receiving') finish(t, 'failed', 'connection closed');
+    };
+    // An empty file has no chunks: it's complete as soon as the channel opens.
+    if (t.size === 0) {
+      if (channel.readyState === 'open') complete();
+      else channel.onopen = complete;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  //  Sending (the owner, answering a request)
+  // ---------------------------------------------------------------------------
 
   async function startSending(t) {
     const file = files.get(t.id);
     if (!file) return;
-    t.state = 'sending';
-    t.startedAt = performance.now();
-    update(t);
 
     try {
       const peer = await peers.connect(t.peerId);
 
-      // A brand-new channel just for this file. 'ordered' (the default)
+      // A brand-new channel just for this download. 'ordered' (the default)
       // means chunks arrive in the order we sent them, so the receiver can
       // simply append them.
       const channel = peer.pc.createDataChannel(`file:${t.id}`, { ordered: true });
@@ -192,9 +256,8 @@ export function createTransfers({ peers, onUpdate }) {
         // Read only the next chunk from disk (File is a Blob; slice is lazy).
         const chunk = await file.slice(offset, offset + chunkSize).arrayBuffer();
         if (t.state !== 'sending') return;
-        // The receiver may have just cancelled and closed the channel; its
-        // file-cancel message can still be on the way. Stop quietly: the
-        // channel's 'close' handler marks the transfer as failed/cancelled.
+        // The receiver may have just cancelled; its file-cancel message can
+        // still be on the way. Stop quietly; the 'close' handler cleans up.
         if (channel.readyState !== 'open') return;
         channel.send(chunk);
         offset += chunk.byteLength;
@@ -220,124 +283,47 @@ export function createTransfers({ peers, onUpdate }) {
   }
 
   // ---------------------------------------------------------------------------
-  //  Receiving
-  // ---------------------------------------------------------------------------
-
-  function accept(id) {
-    const t = transfers.get(id);
-    if (!t || t.state !== 'offered') return;
-    t.state = 'receiving';
-    t.startedAt = performance.now();
-    update(t);
-    peers.send(t.peerId, { type: 'file-accept', id }).catch((err) => finish(t, 'failed', err.message));
-  }
-
-  function decline(id) {
-    const t = transfers.get(id);
-    if (!t || t.state !== 'offered') return;
-    finish(t, 'declined');
-    peers.send(t.peerId, { type: 'file-decline', id }).catch(() => {});
-  }
-
-  /** A data channel the other side opened: is it one of our accepted files? */
-  function handleChannel(peerId, channel) {
-    const id = channel.label.startsWith('file:') ? channel.label.slice(5) : null;
-    const t = id && transfers.get(id);
-    if (!t || t.direction !== 'in' || t.peerId !== peerId || t.state !== 'receiving') {
-      channel.close(); // not something we agreed to
-      return;
-    }
-    channels.set(id, channel);
-    channel.binaryType = 'arraybuffer';
-
-    const chunks = [];
-    let received = 0;
-
-    const complete = () => {
-      // Glue the chunks back together. A Blob can be made from many pieces
-      // without copying them into one big buffer first.
-      const blob = new Blob(chunks, { type: t.mime || 'application/octet-stream' });
-      chunks.length = 0;
-      t.url = URL.createObjectURL(blob);
-      t.bytes = t.size;
-      finish(t, 'done');
-      peers.send(peerId, { type: 'file-received', id }).catch(() => {});
-    };
-
-    channel.onmessage = ({ data }) => {
-      if (t.state !== 'receiving') return;
-      if (!(data instanceof ArrayBuffer)) return;
-      chunks.push(data);
-      received += data.byteLength;
-      if (received > t.size) {
-        finish(t, 'failed', 'received more data than announced');
-        peers.send(peerId, { type: 'file-cancel', id }).catch(() => {});
-        return;
-      }
-      t.bytes = received;
-      update(t, { progressOnly: true });
-      if (received === t.size) complete();
-    };
-    channel.onclose = () => {
-      if (t.state === 'receiving') finish(t, 'failed', 'connection closed');
-    };
-    // An empty file has no chunks: it's complete as soon as the channel opens.
-    if (t.size === 0) {
-      if (channel.readyState === 'open') complete();
-      else channel.onopen = complete;
-    }
-  }
-
-  // ---------------------------------------------------------------------------
   //  Control messages from the other side
   // ---------------------------------------------------------------------------
 
   function handleMessage(peerId, msg) {
+    if (typeof msg.id !== 'string' || !ID_RE.test(msg.id)) return;
     const t = transfers.get(msg.id);
 
     switch (msg.type) {
-      case 'file-offer': {
-        if (transfers.has(msg.id) || typeof msg.id !== 'string' || msg.id.length > 32) return;
-        const size = Number(msg.size);
-        const incoming = {
+      case 'file-request': {
+        if (t) return; // duplicate
+        const file = typeof msg.fileId === 'string' ? getUpload(msg.fileId, peerId) : null;
+        if (!file) {
+          peers.send(peerId, { type: 'file-unavailable', id: msg.id }).catch(() => {});
+          return;
+        }
+        const out = {
           id: msg.id,
+          fileId: msg.fileId,
           peerId,
-          direction: 'in',
-          // Names come from another device: keep them short and path-free.
-          name: String(msg.name || 'file').replace(/[\\/]/g, '_').slice(0, 200),
-          size,
-          mime: typeof msg.mime === 'string' ? msg.mime.slice(0, 100) : '',
-          state: 'offered',
+          direction: 'out',
+          name: file.name,
+          size: file.size,
+          mime: file.type,
+          state: 'sending',
           bytes: 0,
-          startedAt: null,
+          startedAt: performance.now(),
         };
-        transfers.set(incoming.id, incoming);
-        if (!Number.isSafeInteger(size) || size < 0) {
-          finish(incoming, 'failed', 'invalid file size');
-          return;
-        }
-        if (size > MAX_FILE_BYTES) {
-          finish(incoming, 'declined', 'too large for a browser tab');
-          peers.send(peerId, { type: 'file-decline', id: msg.id, reason: 'too-large' }).catch(() => {});
-          return;
-        }
-        update(incoming);
+        transfers.set(out.id, out);
+        files.set(out.id, file);
+        update(out);
+        startSending(out);
         return;
       }
-
       // The rest only make sense for a transfer with this exact peer.
-      case 'file-accept':
-        if (t?.peerId === peerId && t.direction === 'out' && t.state === 'waiting') startSending(t);
-        return;
-      case 'file-decline':
-        if (t?.peerId === peerId && t.direction === 'out' && t.state === 'waiting') {
-          finish(t, 'declined', msg.reason === 'too-large' ? 'too large for their browser' : undefined);
-        }
+      case 'file-unavailable':
+        if (t?.peerId === peerId && t.state === 'requested') finish(t, 'failed', 'no longer available');
         return;
       case 'file-received':
-        // Their receipt can beat our own "buffer drained" bookkeeping on a
-        // small file, so it is the moment the bar reaches 100%.
         if (t?.peerId === peerId && t.direction === 'out') {
+          // Their receipt can beat our own "buffer drained" bookkeeping on a
+          // small file, so it is the moment the bar reaches 100%.
           t.bytes = t.size;
           finish(t, 'done');
         }
@@ -356,14 +342,19 @@ export function createTransfers({ peers, onUpdate }) {
     peers.send(t.peerId, { type: 'file-cancel', id }).catch(() => {});
   }
 
-  /** A device left the court: anything still pending with it is over. */
+  /** Stop every outgoing transfer of a file we stopped serving. */
+  function cancelUploads(fileId) {
+    for (const t of transfers.values()) if (t.direction === 'out' && t.fileId === fileId) cancel(t.id);
+  }
+
+  /** A device left the court: anything still running with it is over. */
   function peerGone(peerId) {
     for (const t of transfers.values()) {
       if (t.peerId === peerId && isActive(t)) finish(t, 'cancelled', 'they left the court');
     }
   }
 
-  /** Remove a finished transfer from the list (and free its memory). */
+  /** Forget a finished download (and free its memory). */
   function dismiss(id) {
     const t = transfers.get(id);
     if (!t || isActive(t)) return;
@@ -373,15 +364,22 @@ export function createTransfers({ peers, onUpdate }) {
     onUpdate?.(null);
   }
 
+  /** The newest download of a court file, if any. */
+  function downloadOf(fileId) {
+    let latest = null;
+    for (const t of transfers.values()) if (t.direction === 'in' && t.fileId === fileId) latest = t;
+    return latest;
+  }
+
   return {
-    sendFile,
-    accept,
-    decline,
+    download,
     cancel,
+    cancelUploads,
     dismiss,
     peerGone,
     handleMessage,
     handleChannel,
+    downloadOf,
     list: () => [...transfers.values()],
   };
 }
