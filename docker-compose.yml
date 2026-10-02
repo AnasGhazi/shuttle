@@ -1,0 +1,17 @@
+# Local Redis for development.
+#   Start:  docker compose up -d redis
+#   Stop:   docker compose down
+#   CLI:    docker compose exec redis redis-cli
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    # Shuttle's data is short-lived (everything has a TTL), so persistence is
+    # turned off: a restart simply starts with an empty court.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

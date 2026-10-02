@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Shuttle</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1 class="logo">Shuttle</h1>
+    <span id="conn-status" class="status status--offline">Connecting…</span>
+  </header>
+
+  <main class="layout">
+    <section class="card">
+      <h2 id="court-label">The court</h2>
+      <p class="muted">You are <strong id="you-name">…</strong></p>
+    </section>
+
+    <section class="card">
+      <h2>Players on court <span id="device-count" class="badge">0</span></h2>
+      <ul id="device-list" class="device-list"></ul>
+      <p id="devices-empty" class="muted">No one else here yet. Open Shuttle on another device on this Wi-Fi.</p>
+    </section>
+  </main>
+
+  <!-- Socket.IO serves its own browser client at this path. -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

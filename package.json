@@ -1,0 +1,28 @@
+{
+  "name": "shuttle",
+  "version": "0.1.0",
+  "description": "Serve text and files between devices on the same Wi-Fi. No login, no install.",
+  "private": true,
+  "main": "src/index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test \"test/**/*.test.js\"",
+    "redis:up": "docker compose up -d redis",
+    "redis:down": "docker compose down"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "ipaddr.js": "^2.5.0",
+    "proxy-addr": "^2.0.8",
+    "redis": "^6.3.0",
+    "socket.io": "^4.8.4"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.4"
+  }
+}
