@@ -43,8 +43,8 @@ export function flyShuttle(kind = 'serve') {
     // Derivative of the same curve = direction of travel.
     const dx = to.x - from.x;
     const dy = to.y - from.y - peak * 4 * (1 - 2 * t);
-    // The symbol's cork points "up" (-y); rotate so it points along travel.
-    const angle = (Math.atan2(dy, dx) * 180) / Math.PI + 90;
+    // The symbol's cork points "down" (+y); rotate so it points along travel.
+    const angle = (Math.atan2(dy, dx) * 180) / Math.PI - 90;
     frames.push({
       transform: `translate(${x - size / 2}px, ${y - size / 2}px) rotate(${angle}deg)`,
       opacity: i === STEPS ? 0 : 1,

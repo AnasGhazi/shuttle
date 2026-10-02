@@ -277,3 +277,41 @@ docker compose --profile app up --build     # full stack in containers
       TURN" and files still arrive.
 - [ ] Redeploy or restart while connected: devices reconnect on their own and
       the text is still there.
+
+---
+
+## Redesign: "kinda like airdrop."
+
+**What:** the frontend now follows the new mockup. Blue hero on the left
+("BUILT WITH" chips, faint court lines), and a white court sweeping in from the
+right with a striped curved edge. On phones the edge runs across the top of a
+white sheet. Fonts (DM Sans, Outfit) are self-hosted in `public/fonts`, so the
+strict CSP stays and the app works offline on a LAN.
+
+**How the controls map:**
+- **Players · N** pill: tap it for the player list (link status, **Send
+  file**, **Test rally**). Its dot is cork-yellow when connected and grey while
+  reconnecting.
+- Big heading: the court you're on ("Local network court", "Private court 1234").
+- **your serve** box: the live shared text, as before.
+- Drop zone: dropped or browsed files are *staged* there until you pick who
+  gets them.
+- **Broadcast**: staged files go to everyone. With nothing staged, it opens
+  the file picker first.
+- **Send to one device**: with one other device it goes straight there;
+  with more, pick one from the list.
+- The line under the buttons shows "Nothing on the court yet. Serve
+  something!" on an empty court.
+- Private court and "Under the net" sit below, in the same style.
+
+**Two-device checklist:**
+- [ ] Laptop (≥1100px wide) looks like the mockup; phone shows the blue header,
+      striped curve, white sheet, blue footer.
+- [ ] Drop a file on the laptop: "1 file ready to serve". **Broadcast**: the
+      phone shows Accept / Decline (toast at the top on phones).
+- [ ] Phone: **Send to one device** with nothing staged opens the file picker,
+      and the file goes straight to the laptop.
+- [ ] Three devices: **Send to one device** lists the other two; only the
+      chosen one gets the offer.
+- [ ] Tap **Players · N**: the list shows "Linked, direct on your network";
+      **Test rally** shows the round trip.

@@ -288,15 +288,38 @@ function syncPeers() {
   }
 }
 
-// One hidden <input type=file> for every "serve" button; we remember who
-// the files are for (one device id, or null for everyone).
-let serveTarget = null;
+// ---- Serving files ------------------------------------------------------------
+//
+// Files you drop (or browse to) wait in the drop zone ("staged") until you
+// choose who gets them: Broadcast = everyone, Send to one device = pick one.
+// Pressing either with nothing staged opens the file picker first.
+
+let staged = []; // File objects waiting to be served
+let afterPick = null; // after the file picker closes: null = just stage, 'all', or a device id
 const fileInput = $('#file-input');
 
-function pickFiles(target) {
-  serveTarget = target;
+function openFilePicker(then) {
+  afterPick = then;
   fileInput.value = ''; // so picking the same file twice still fires 'change'
-  fileInput.click();
+  fileInput.click(); // must run inside the click handler, or iOS ignores it
+}
+
+fileInput.addEventListener('change', () => {
+  const files = [...fileInput.files];
+  if (files.length === 0) return;
+  if (afterPick === null) stageFiles(files);
+  else serveFiles(files, afterPick === 'all' ? null : afterPick);
+  afterPick = null;
+});
+
+function stageFiles(files) {
+  staged.push(...files);
+  renderStaged();
+}
+
+function unstage(index) {
+  staged.splice(index, 1);
+  renderStaged();
 }
 
 function serveFiles(files, target) {
@@ -308,17 +331,74 @@ function serveFiles(files, target) {
   for (const file of files) for (const peerId of targets) transfers.sendFile(peerId, file);
 }
 
-fileInput.addEventListener('change', () => serveFiles([...fileInput.files], serveTarget));
-$('#serve-all').addEventListener('click', () => pickFiles(null));
+/** Serve the staged files (or pick some first) to one device or everyone. */
+function serveTo(target) {
+  closePicker();
+  if (otherDevices().length === 0) return toast('No one else is on the court yet.');
+  if (staged.length === 0) return openFilePicker(target ?? 'all');
+  serveFiles(staged, target);
+  staged = [];
+  renderStaged();
+}
 
-// Drag and drop anywhere on the page serves to everyone.
+$('#broadcast').addEventListener('click', () => serveTo(null));
+
+$('#send-one').addEventListener('click', () => {
+  const others = otherDevices();
+  if (others.length === 0) return toast('No one else is on the court yet.');
+  if (others.length === 1) return serveTo(others[0].id); // nobody to choose between
+  $('#picker').hidden ? openPicker() : closePicker();
+});
+
+function openPicker() {
+  $('#picker-list').replaceChildren(
+    ...otherDevices().map((d) => button(displayName(d), () => serveTo(d.id), 'btn btn--outline btn--small')),
+  );
+  $('#picker').hidden = false;
+  $('#send-one').setAttribute('aria-expanded', 'true');
+}
+
+function closePicker() {
+  $('#picker').hidden = true;
+  $('#send-one').setAttribute('aria-expanded', 'false');
+}
+
+// The drop zone: click anywhere in it (or the link) to browse, or drop files.
+const dropzone = $('#dropzone');
+dropzone.addEventListener('click', (e) => {
+  if (e.target.closest('.staged__remove')) return;
+  openFilePicker(null);
+});
+dropzone.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    openFilePicker(null);
+  }
+});
+
+// Files dropped anywhere on the page are staged; the zone lights up while
+// something is dragged over it.
 document.addEventListener('dragover', (e) => {
-  if (e.dataTransfer?.types.includes('Files')) e.preventDefault();
+  if (!e.dataTransfer?.types.includes('Files')) return;
+  e.preventDefault();
+  dropzone.classList.toggle('dropzone--over', dropzone.contains(e.target));
+});
+document.addEventListener('dragleave', (e) => {
+  if (!e.relatedTarget) dropzone.classList.remove('dropzone--over');
 });
 document.addEventListener('drop', (e) => {
+  dropzone.classList.remove('dropzone--over');
   if (!e.dataTransfer?.files.length) return;
   e.preventDefault();
-  serveFiles([...e.dataTransfer.files], null);
+  stageFiles([...e.dataTransfer.files]);
+});
+
+// ---- Players pill ----------------------------------------------------------------
+
+$('#players-toggle').addEventListener('click', () => {
+  const panel = $('#players-panel');
+  panel.hidden = !panel.hidden;
+  $('#players-toggle').setAttribute('aria-expanded', String(!panel.hidden));
 });
 
 // =============================================================================
@@ -387,9 +467,17 @@ function initials(name) {
   return name.split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
 }
 
+// The players pill doubles as the connection indicator: a cork-yellow dot
+// while connected, grey while (re)connecting.
+let connection = { online: false, text: 'Connecting…' };
 function setStatus(kind, text) {
-  $('#conn-status').className = `status status--${kind}`;
-  $('#conn-status .status__text').textContent = text;
+  connection = { online: kind === 'online', text };
+  renderStatusPill();
+}
+
+function renderStatusPill() {
+  $('#players-toggle').className = `status-pill${connection.online ? '' : ' status-pill--offline'}`;
+  $('#players-label').textContent = connection.online && state.court ? `Players · ${state.devices.length}` : connection.text;
 }
 
 function render() {
@@ -403,12 +491,37 @@ function render() {
 function renderHeader() {
   $('#court-label').textContent = state.court?.label ?? 'Finding your court…';
   $('#you-name').textContent = state.you?.name ?? '…';
-  const n = state.devices.length;
-  $('#player-summary').textContent = n <= 1 ? 'Just you on court' : `${n} players on court`;
+  renderStatusPill();
 }
 
+// The line under the buttons: the empty-court invitation, or a reminder of
+// how files travel once something is happening.
 function renderEmptyState() {
-  $('#empty-state').hidden = Boolean(textarea.value) || transfers.list().length > 0;
+  const empty = !textarea.value && transfers.list().length === 0 && staged.length === 0;
+  $('#hint').textContent = empty
+    ? 'Nothing on the court yet. Serve something!'
+    : 'Files fly device to device and never touch the server.';
+}
+
+function renderStaged() {
+  const list = $('#staged-list');
+  list.hidden = staged.length === 0;
+  $('#drop-title').textContent =
+    staged.length === 0 ? 'Drop files to serve' : `${staged.length} file${staged.length > 1 ? 's' : ''} ready to serve`;
+  list.replaceChildren(
+    ...staged.map((file, i) => {
+      const li = el('li', { className: 'staged__item' });
+      const remove = button('×', () => unstage(i), 'staged__remove');
+      remove.setAttribute('aria-label', `Remove ${file.name}`);
+      li.append(
+        el('span', { className: 'staged__name', textContent: file.name, title: file.name }),
+        el('span', { className: 'staged__size', textContent: formatBytes(file.size) }),
+        remove,
+      );
+      return li;
+    }),
+  );
+  renderEmptyState();
 }
 
 function renderCourt() {
@@ -450,8 +563,8 @@ function linkLabel(link) {
 
 function renderPlayers() {
   const others = otherDevices();
-  $('#device-count').textContent = String(state.devices.length);
   $('#devices-empty').hidden = others.length > 0;
+  if (!$('#picker').hidden) openPicker(); // keep the device picker current
 
   $('#device-list').replaceChildren(
     ...others.map((d) => {
@@ -468,8 +581,8 @@ function renderPlayers() {
 
       const actions = el('div', { className: 'player__actions' });
       actions.append(
-        button('Serve file', () => pickFiles(d.id), 'btn btn--primary btn--small'),
-        button('Test rally', () => testRally(d.id), 'btn btn--quiet btn--small'),
+        button('Send file', () => serveTo(d.id), 'btn btn--primary btn--small'),
+        button('Test rally', () => testRally(d.id), 'btn btn--outline btn--small'),
       );
 
       li.append(avatar, info, actions);
@@ -526,8 +639,8 @@ function renderRallies() {
       const title = el('div', { className: 'transfer__title' });
       title.append(
         el('span', { className: 'transfer__dir', textContent: t.direction === 'out' ? '↗' : '↙' }),
-        el('strong', { textContent: t.name }),
-        el('span', { className: 'meta', textContent: `${formatBytes(t.size)} · ${t.direction === 'out' ? `to ${who}` : `from ${who}`}` }),
+        el('span', { className: 'transfer__name', textContent: t.name }),
+        el('span', { className: 'transfer__meta', textContent: `${formatBytes(t.size)} · ${t.direction === 'out' ? `to ${who}` : `from ${who}`}` }),
       );
 
       // Progress bar: an outer track and an inner fill whose width we set.
@@ -539,21 +652,21 @@ function renderRallies() {
       bar.append(fill);
 
       const status = el('div', { className: 'transfer__status', textContent: transferStatus(t) });
-      const actions = el('div', { className: 'row' });
+      const actions = el('div', { className: 'transfer__actions' });
 
       if (t.state === 'offered') {
         actions.append(
           button('Accept', () => transfers.accept(t.id), 'btn btn--primary btn--small'),
-          button('Decline', () => transfers.decline(t.id), 'btn btn--small'),
+          button('Decline', () => transfers.decline(t.id), 'btn btn--outline btn--small'),
         );
       } else if (['waiting', 'sending', 'receiving', 'confirming'].includes(t.state)) {
-        actions.append(button('Cancel', () => transfers.cancel(t.id), 'btn btn--small'));
+        actions.append(button('Cancel', () => transfers.cancel(t.id), 'btn btn--outline btn--small'));
       } else {
         if (t.direction === 'in' && t.state === 'done') {
           // A blob: URL plus the `download` attribute saves it under its name.
           actions.append(el('a', { href: t.url, download: t.name, className: 'btn btn--primary btn--small', textContent: 'Save file' }));
         }
-        actions.append(button('Dismiss', () => transfers.dismiss(t.id), 'btn btn--quiet btn--small'));
+        actions.append(button('Dismiss', () => transfers.dismiss(t.id), 'link-btn'));
       }
 
       // No bar until bytes can move: before acceptance it would just be noise.
