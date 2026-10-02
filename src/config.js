@@ -46,6 +46,8 @@ const config = {
   textTtlS: int('TEXT_TTL_S', 30 * 60),
   // Longest text a court can hold (characters).
   textMaxLength: int('TEXT_MAX_LENGTH', 50_000),
+  // A court code stays valid this long after the last device leaves its court.
+  codeTtlS: int('CODE_TTL_S', 30 * 60),
 
   // ==========================================================================
   //  WebRTC ICE servers: how browsers find a path to each other.

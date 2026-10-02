@@ -186,3 +186,53 @@ npm run dev
 Verified here: 50 MB byte-identical (SHA-256) Chromium↔Chromium,
 Chromium→WebKit and WebKit→Chromium; decline, empty file, cancel mid-transfer,
 serve to everyone with 3 devices.
+
+---
+
+## Phase 5: court codes, device names, and the badminton theme
+
+**What:**
+- **Names** like "Swift Racket" (`src/names.js`), kept per device in Redis
+  and unique within a court.
+- **Private courts.** **Make a private court** creates `code:<random id>` and a
+  4-digit code (`shuttle:code:<1234>`). Anyone who enters the code, or opens
+  the share link `/?code=1234`, joins from any network.
+- **Theme.** Court-green header with white court lines, rounded cards, a
+  shuttlecock that flies along an arc on every serve and return, dark mode,
+  and two columns on wide screens.
+
+**Why this way:**
+- **Codes are `SET NX EX`.** A code can't be handed to two courts at once.
+  Heartbeats refresh its TTL, so it stays valid while anyone is on the
+  court and expires 30 minutes after the last player leaves.
+- **Brute-force guard.** Only 10,000 codes exist, so wrong guesses are capped
+  at 10 per minute per *network* (per device would be useless: tokens are free).
+- **Rejoin safety.** A tab remembers `{code, courtId}`. If the code has since
+  been reused by someone else, the IDs won't match and you get "expired"
+  instead of silently joining strangers.
+- **The arc** is a sampled parabola fed to the Web Animations API, rotated
+  along its tangent so the cork leads (`public/js/shuttle.js`). It's skipped
+  when the OS asks for reduced motion.
+
+**Run it:**
+```bash
+npm test
+npm run dev
+```
+
+**Two-device checklist:**
+- [ ] Each device shows a badminton name in the header, and the other device
+      lists it under **Players**.
+- [ ] Fresh court: "Nothing on the court yet. Serve something!"
+- [ ] Laptop: **Make a private court** shows 4 big digits. Phone: type them
+      under **Have a code?** Both now show "Private court 1234".
+- [ ] Turn the phone's Wi-Fi off (mobile data) and repeat: the code still
+      brings them together (the dual-stack / different-network fix).
+- [ ] **Share link** opens the share sheet on the phone, or copies the link on a laptop.
+      Opening the link joins directly.
+- [ ] A wrong code says so; 10+ wrong codes in a minute shows the rate limit.
+- [ ] Reload while on a private court: you stay on it.
+- [ ] Serve text or a file: the shuttle arcs away from you and toward the
+      other device.
+- [ ] Turn on "Reduce motion" (iOS: Settings → Accessibility → Motion): no
+      arc.

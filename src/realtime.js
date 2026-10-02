@@ -13,6 +13,7 @@
 
 const crypto = require('node:crypto');
 const { courtIdFromIp, LOCAL_COURT_ID } = require('./courtId');
+const { randomName } = require('./names');
 
 const courtRoom = (courtId) => `court:${courtId}`;
 const deviceRoom = (deviceId) => `device:${deviceId}`;
@@ -24,6 +25,7 @@ const deviceRoom = (deviceId) => `device:${deviceId}`;
  */
 const TOKEN_RE = /^[0-9a-f]{32}$/;
 const DEVICE_ID_RE = /^[0-9a-f]{16}$/;
+const CODE_RE = /^\d{4}$/;
 // An SDP offer is a few KB; this leaves plenty of room.
 const MAX_SIGNAL_BYTES = 32 * 1024;
 function deviceIdFromToken(token) {
@@ -31,11 +33,15 @@ function deviceIdFromToken(token) {
 }
 
 /** Describe a court the way the client should see it. */
-function describeCourt(courtId) {
-  if (courtId === LOCAL_COURT_ID) return { id: courtId, kind: 'lan', label: 'Local network' };
+function describeCourt(courtId, code) {
+  if (code) return { id: courtId, kind: 'code', code, label: `Private court ${code}` };
+  if (courtId === LOCAL_COURT_ID) return { id: courtId, kind: 'lan', label: 'Local network court' };
   if (courtId.startsWith('solo:')) return { id: courtId, kind: 'solo', label: 'Unrecognized network' };
-  return { id: courtId, kind: 'network', label: 'Your network' };
+  return { id: courtId, kind: 'network', label: 'Your network court' };
 }
+
+/** Call a Socket.IO acknowledgement if the client sent one. */
+const replier = (ack) => (typeof ack === 'function' ? ack : () => {});
 
 function attachRealtime(io, { store, clientIp, config }) {
   // Court work that hasn't finished yet. On shutdown we wait for it, so the
@@ -97,13 +103,18 @@ function attachRealtime(io, { store, clientIp, config }) {
     // (Note: every socket.on() below is registered synchronously. Anything
     // registered after an `await` could miss the client's first messages.)
     let queue = Promise.resolve();
-    const serial = (fn) => {
-      queue = queue.then(fn).catch((err) => console.error('[court]', err));
+    const serial = (fn, reply) => {
+      queue = queue.then(fn).catch((err) => {
+        console.error('[court]', err);
+        reply?.({ error: 'server-error' }); // don't leave the client hanging
+      });
       track(queue);
       return queue;
     };
 
-    serial(() => store.registerDevice(deviceId, socket.id));
+    serial(async () => {
+      socket.data.name = await store.registerDevice(deviceId, socket.id);
+    });
 
     async function leaveCurrentCourt() {
       const prev = socket.data.court;
@@ -124,19 +135,69 @@ function attachRealtime(io, { store, clientIp, config }) {
       socket.join(courtRoom(court.id));
       await store.touchPresence(court.id, deviceId);
 
+      // Two devices on one court with the same name would be confusing:
+      // the newcomer picks another.
+      let devices = await store.listDevices(court.id);
+      const taken = new Set(devices.filter((d) => d.id !== deviceId).map((d) => d.name));
+      if (taken.has(socket.data.name)) {
+        socket.data.name = randomName(taken);
+        await store.renameDevice(deviceId, socket.data.name);
+        devices = await store.listDevices(court.id);
+      }
+
       socket.emit('court:state', {
         court,
-        you: { id: deviceId },
-        devices: await store.listDevices(court.id),
+        you: { id: deviceId, name: socket.data.name },
+        devices,
         text: await store.getText(court.id),
       });
       // Tell everyone else on the court about the new arrival.
-      socket.to(courtRoom(court.id)).emit('court:devices', await store.listDevices(court.id));
+      socket.to(courtRoom(court.id)).emit('court:devices', devices);
     }
 
-    // Client asks to join its court (sent right after every (re)connect).
-    socket.on('court:join', () => {
-      serial(() => joinCourt(describeCourt(socket.data.networkCourtId)));
+    /**
+     * Join a court. Sent right after every (re)connect.
+     *   {}                    -> the court for this device's network
+     *   { code, courtId? }    -> a private court by its 4-digit code. The
+     *                            client includes the courtId it expects when
+     *                            rejoining, so an expired code that was
+     *                            reused by strangers isn't joined by mistake.
+     */
+    socket.on('court:join', (payload, ack) => {
+      const reply = replier(ack);
+      serial(async () => {
+        const code = payload?.code;
+        if (code === undefined || code === null || code === '') {
+          await joinCourt(describeCourt(socket.data.networkCourtId));
+          return reply({ ok: true });
+        }
+        if (typeof code !== 'string' || !CODE_RE.test(code)) return reply({ error: 'bad-code' });
+
+        // Wrong guesses are counted per network (not per device: a script
+        // could make up new device tokens all day).
+        const network = socket.data.networkCourtId;
+        if (await store.codeGuessesExceeded(network)) return reply({ error: 'rate-limited' });
+
+        const courtId = await store.resolveCode(code);
+        if (!courtId) {
+          await store.recordWrongCode(network);
+          return reply({ error: 'code-not-found' });
+        }
+        if (payload.courtId && payload.courtId !== courtId) return reply({ error: 'code-expired' });
+
+        await joinCourt(describeCourt(courtId, code));
+        reply({ ok: true });
+      }, reply);
+    });
+
+    /** Make a new private court with a fresh code, and move there. */
+    socket.on('court:create', (_payload, ack) => {
+      const reply = replier(ack);
+      serial(async () => {
+        const { code, courtId } = await store.createCodeCourt();
+        await joinCourt(describeCourt(courtId, code));
+        reply({ ok: true, code });
+      }, reply);
     });
 
     // ---- Shared text ------------------------------------------------------
@@ -145,7 +206,7 @@ function attachRealtime(io, { store, clientIp, config }) {
     // with a fresh version number, tell the sender which version it got (the
     // "ack" callback), and broadcast it to everyone else on the court.
     socket.on('text:update', (payload, ack) => {
-      const reply = typeof ack === 'function' ? ack : () => {};
+      const reply = replier(ack);
       const text = payload?.text;
       if (typeof text !== 'string' || text.length > config.textMaxLength) {
         return reply({ error: 'text-too-long' });
@@ -156,7 +217,7 @@ function attachRealtime(io, { store, clientIp, config }) {
         const saved = await store.setText(court.id, text, deviceId);
         reply({ ok: true, version: saved.version, expiresAt: saved.expiresAt });
         socket.to(courtRoom(court.id)).emit('text:changed', saved);
-      });
+      }, reply);
     });
 
     // ---- WebRTC signaling --------------------------------------------------
@@ -185,7 +246,10 @@ function attachRealtime(io, { store, clientIp, config }) {
     // Heartbeat: refresh our "last seen" score so we don't get pruned.
     const heartbeat = setInterval(() => {
       const court = socket.data.court;
-      if (court) store.touchPresence(court.id, deviceId).catch(() => {});
+      if (!court) return;
+      store.touchPresence(court.id, deviceId).catch(() => {});
+      // A private court's code stays valid while anyone is still on it.
+      if (court.code) store.touchCode(court.code, court.id).catch(() => {});
     }, config.presenceHeartbeatMs);
 
     socket.on('disconnect', () => {

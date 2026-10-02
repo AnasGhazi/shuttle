@@ -3,53 +3,130 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="description" content="Serve text and files between devices on the same Wi-Fi. No login, no install.">
+  <meta name="theme-color" content="#1f7a4d">
   <title>Shuttle</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
-  <header class="topbar">
-    <h1 class="logo">Shuttle</h1>
-    <span id="conn-status" class="status status--offline">Connecting…</span>
+  <!-- One shuttlecock drawing, reused everywhere with <use href="#shuttle">.
+       The cork points up; shuttle.js rotates it along its flight path. -->
+  <svg class="sprite" aria-hidden="true">
+    <symbol id="shuttle" viewBox="0 0 64 64">
+      <g stroke="currentColor" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round">
+        <path d="M23 25 L12 56 Q32 62 52 56 L41 25 Z" fill="#fff"/>
+        <path d="M28 25 L24 57 M32 25 V59 M36 25 L40 57 M15 47 Q32 52 49 47" fill="none"/>
+        <path d="M22 24 C22 10 42 10 42 24 Z" fill="#f2c94c"/>
+      </g>
+    </symbol>
+  </svg>
+
+  <header class="court-header">
+    <div class="court-header__lines" aria-hidden="true"></div>
+    <div class="court-header__bar">
+      <div class="brand">
+        <svg class="brand__icon" aria-hidden="true"><use href="#shuttle"/></svg>
+        <span>Shuttle</span>
+      </div>
+      <span id="conn-status" class="status status--offline"><span class="status__dot"></span><span class="status__text">Connecting…</span></span>
+    </div>
+    <div class="court-header__info">
+      <h1 id="court-label">Finding your court…</h1>
+      <p><span id="player-summary">Warming up</span> · You're <strong id="you-name">…</strong></p>
+    </div>
   </header>
 
   <main class="layout">
-    <section class="card">
-      <h2 id="court-label">The court</h2>
-      <p class="muted">You are <strong id="you-name">…</strong></p>
-    </section>
+    <div class="layout__col">
+      <section class="card card--court" aria-labelledby="text-heading">
+        <div class="card__head">
+          <h2 id="text-heading">The court</h2>
+          <span id="text-meta" class="meta"></span>
+        </div>
+        <div id="empty-state" class="empty">
+          <svg class="empty__icon" aria-hidden="true"><use href="#shuttle"/></svg>
+          <p>Nothing on the court yet. Serve something!</p>
+        </div>
+        <label class="visually-hidden" for="court-text">Shared text</label>
+        <textarea id="court-text" rows="5" placeholder="Type or paste text to serve it to everyone on the court…"></textarea>
+        <div class="row">
+          <button id="serve-all" class="btn btn--primary" type="button">Serve a file</button>
+          <button id="copy-text" class="btn" type="button">Copy text</button>
+          <button id="clear-text" class="btn btn--quiet" type="button">Clear</button>
+        </div>
+        <input type="file" id="file-input" multiple hidden>
+      </section>
 
-    <section class="card">
-      <h2>Shared text</h2>
-      <textarea id="court-text" rows="6" placeholder="Type or paste here. Everyone on the court sees it live."></textarea>
-      <div class="row">
-        <button id="copy-text" type="button">Copy</button>
-        <button id="clear-text" type="button">Clear</button>
-        <span id="text-meta" class="muted"></span>
-      </div>
-    </section>
+      <section id="rallies" class="card" aria-labelledby="rallies-heading" hidden>
+        <div class="card__head">
+          <h2 id="rallies-heading">Rallies</h2>
+          <span class="meta">Device to device, never via the server</span>
+        </div>
+        <ul id="transfer-list" class="transfers"></ul>
+      </section>
+    </div>
 
-    <section class="card">
-      <h2>Players on court <span id="device-count" class="badge">0</span></h2>
-      <ul id="device-list" class="device-list"></ul>
-      <p id="devices-empty" class="muted">No one else here yet. Open Shuttle on another device on this Wi-Fi.</p>
-    </section>
-    <section class="card">
-      <h2>Files</h2>
-      <input type="file" id="file-input" multiple hidden>
-      <div class="row">
-        <button id="serve-all" type="button">Serve a file to everyone</button>
-      </div>
-      <p class="muted">Files go straight to the other device and never touch the server. You can also drop files anywhere on the page.</p>
-      <ul id="transfer-list" class="transfer-list"></ul>
-    </section>
+    <div class="layout__col">
+      <section class="card" aria-labelledby="players-heading">
+        <div class="card__head">
+          <h2 id="players-heading">Players</h2>
+          <span id="device-count" class="pill">1</span>
+        </div>
+        <ul id="device-list" class="players"></ul>
+        <p id="devices-empty" class="hint">
+          Waiting for an opponent… Open Shuttle on another device on this Wi-Fi.
+          Not showing up? Use a private court code below.
+        </p>
+      </section>
 
-    <details class="card">
-      <summary>Under the net (WebRTC log)</summary>
-      <ol id="rtc-log" class="log"></ol>
-    </details>
+      <section class="card" aria-labelledby="code-heading">
+        <div class="card__head">
+          <h2 id="code-heading">Private court</h2>
+        </div>
+
+        <div id="code-network">
+          <p class="hint">
+            For devices on different networks, or when one is on IPv4 and the
+            other on IPv6. Make a court and share its 4-digit code.
+          </p>
+          <div class="row">
+            <button id="create-code" class="btn btn--primary" type="button">Make a private court</button>
+          </div>
+          <form id="join-form" class="join" autocomplete="off">
+            <label for="code-input">Have a code?</label>
+            <div class="row">
+              <input id="code-input" class="code-input" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="0000" required>
+              <button class="btn" type="submit">Join court</button>
+            </div>
+          </form>
+        </div>
+
+        <div id="code-private" hidden>
+          <p class="hint">Enter this code on the other device:</p>
+          <div id="code-digits" class="code-digits" aria-live="polite"></div>
+          <div class="row">
+            <button id="share-code" class="btn btn--primary" type="button">Share link</button>
+            <button id="leave-code" class="btn btn--quiet" type="button">Back to network court</button>
+          </div>
+          <p class="hint">The code stops working 30 minutes after everyone leaves.</p>
+        </div>
+        <p id="code-error" class="error" role="alert" hidden></p>
+      </section>
+
+      <details class="card card--quiet">
+        <summary>Under the net (WebRTC log)</summary>
+        <ol id="rtc-log" class="log"></ol>
+      </details>
+    </div>
   </main>
 
+  <footer class="footer">
+    Files fly peer-to-peer. Text clears 30 minutes after the last edit. No accounts, ever.
+  </footer>
+
   <div id="toasts" class="toasts" aria-live="polite"></div>
+  <div id="flight-layer" class="flight-layer" aria-hidden="true"></div>
 
   <!-- Socket.IO serves its own browser client at this path. -->
   <script src="/socket.io/socket.io.js"></script>

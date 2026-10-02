@@ -335,7 +335,12 @@ export function createTransfers({ peers, onUpdate }) {
         }
         return;
       case 'file-received':
-        if (t?.peerId === peerId && t.direction === 'out') finish(t, 'done');
+        // Their receipt can beat our own "buffer drained" bookkeeping on a
+        // small file, so it is the moment the bar reaches 100%.
+        if (t?.peerId === peerId && t.direction === 'out') {
+          t.bytes = t.size;
+          finish(t, 'done');
+        }
         return;
       case 'file-cancel':
         if (t?.peerId === peerId && isActive(t)) finish(t, 'cancelled', 'they cancelled');
